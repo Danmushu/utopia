@@ -230,18 +230,49 @@ v2: http://acme.com/hr#Employee  rdfs:label "Staff Member" → key = staff_membe
   |---|---|
   | range 能映射 | 照映射建。number 收 `decimal` `integer` 及其全部有界/无符号变体、`double` `float`、`owl:real` `owl:rational`；date 收 `date` `dateTime` `dateTimeStamp` `gYear` `gYearMonth`（我们的日期格式本就是 `YYYY[-MM[-DD]]`，逐级可省）；bool 收 `boolean`；text 收 `string` 及其派生、`anyURI`、`rdf:langString`、`rdfs:Literal` |
   | **没写 range** | 建成 `text`，在预览里列出。词汇表没做声明，我们只知道是字面量，`text` 是诚实的超集 |
-  | range 存在但映射不了 | **跳过并报告**：`time` `gMonth` `gDay` `gMonthDay`（缺年）、`duration` 系列（时长不是时点）、`hexBinary` `base64Binary`、`rdf:XMLLiteral`、`QName` 等 XML 内部标识、带 `withRestrictions` 的自定义类型，以及多条 `rdfs:range`（同 domain 的交集陷阱） |
+  | range 存在但**类型**表达不了 | 建成 `text` **并报告**：`time` `gMonth` `gDay` `gMonthDay`（缺年）、`duration` 系列（时长不是时点）、多条 `rdfs:range`（交集陷阱：不猜类型，但值仍是字面量）、以及任何我们不认识的类型 IRI |
+  | 抽取器**不可能从散文里读出**这种值 | **跳过并报告**：`base64Binary` `hexBinary`（二进制块）、`rdf:XMLLiteral`（XML 片段）、`QName` `ID` `IDREF` `ENTITY`（XML 内部管道） |
 
-  > **修订**：初稿把「不猜成 text」的理由写成「类型错的属性会让取值在写入时被
-  > `attr_datatype` 挡掉」。查 `normalize_attr_value` 后这条不成立——**`text` 接受任何
-  > 字符串，从不拦**，会拦的是 number/date/bool。真正的理由是另一条：**range 存在**
-  > 意味着词汇表做了一个明确声明，悄悄降级成 text 是把那个声明扔掉且不留痕迹；
-  > 而 range 缺席时没有声明可扔，宽松默认就是对的。区别在有没有东西被丢掉，
-  > 不在会不会被拦。
+  > **两次修订，第二次推翻了第一次。**
+  >
+  > 初稿说「不猜成 text，因为类型错的属性会让取值被 `attr_datatype` 挡掉」。
+  > 查 `normalize_attr_value` 后不成立——**`text` 接受任何字符串，从不拦**，
+  > 会拦的是 number / date / bool。
+  >
+  > 于是改成「range 存在就是词汇表做了声明，降级成 text 会把它扔掉且不留痕迹」。
+  > **这条也站不住**：预览就在报告它，何来「不留痕迹」。而跳过的代价是属性根本
+  > 不存在，抽取器不会被告知它，那条知识**彻底不会被捕获**——这正是本仓库反复
+  > 当成最坏结果的那种失败。
+  >
+  > 正确的分界不是「能不能精确映射」，也不是「该不该进图谱」——属性值本来就在图谱里。
+  > 是**「抽取器有没有可能从散文里读出这个值」**。「门店每天 9:00 开门」里有
+  > `09:00`，所以 `xsd:time` 的属性填得上，按 text 存只丢排序语义，值还在。
+  > 一张 base64 平面图不会出现在散文里，所以那个属性建了也永远是空的。
+  >
+  > 跳过它保护的不是数据（本来就不会有值），是**提示词**：每个属性都是抽取
+  > 提示词里的一行，每个文本块付一遍，永远填不上的那些就是逐块付费的死噪音。
 - **domain 指向没被导入的类**（外部词汇表里的类）：跳过 + 计入预览，不静默。
 - **多个 `rdfs:domain`**：存不下。这一条才真的要等关联表。
 
 所以顺序是：**先落单域属性**（P2b 的产物已经够用），多域的随关联表一起。
+
+> **顺带查明的一件事：属性抽取这条路此前是死的。**
+>
+> 代码是全的——提示词里有属性段与规则 10，`ExtractedFact` 有 `value`，
+> `normalize_attr_value` 按 datatype 校验，值落 `facts.object_value`，证据/时态/审阅全套复用。
+> 但**内置本体一个属性都没有**，所以 `attr_lines` 一直是空的，整段属性提示词从未出现过。
+> 除非有人手工建属性，这条路从落地起就没被执行过。
+>
+> OWL 导入开始建属性，它就变成活的了。端到端验过一遍（三个 datatype 各一个）：
+>
+> ```
+> floor_area  {"value": 860}          number，不是字符串
+> opened_on   {"value": "2024-09-01"} date
+> opens_at    {"value": "10:00"}      text（降级的 xsd:time）
+> ```
+>
+> 证据、置信度、界面渲染都对，零丢弃信号。**`opens_at` 那两条在旧的跳过规则下
+> 根本不会存在**——这是存得下就别丢那个决定的直接证据。
 
 #### 二、关联表：多值 domain/range
 

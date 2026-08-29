@@ -261,7 +261,11 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             iri: iri.clone(),
         });
     }
-    for iri in obj_props.iter().chain(data_props.iter()) {
+    // **并集去重，不是两个集合首尾相接**：词汇表常把同一个属性既声明为
+    // rdf:Property 又声明为 owl:DatatypeProperty（FOAF 的 name、age、nick… 都这样），
+    // 两个集合各收一次，chain 就会把它吐两遍。分类看 data_props 就够了。
+    let all_props: BTreeSet<&String> = obj_props.iter().chain(data_props.iter()).collect();
+    for iri in all_props {
         proj.properties.push(OwlProperty {
             key: key_from_iri(iri),
             label: pick_lang(labels.get(iri))
@@ -328,9 +332,210 @@ pub fn key_from_iri(iri: &str) -> String {
     out.chars().take(40).collect()
 }
 
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
+/// `rdfs:range` 映射到我们的四种 datatype 的结果。**三路，不是两路**。
+#[derive(Debug, Clone, PartialEq)]
+pub enum RangeMapping {
+    /// 能映射到 `text` / `number` / `date` / `bool`
+    Datatype(&'static str),
+    /// 压根没写 range：词汇表没做任何声明，只知道是字面量。
+    /// `text` 是诚实的超集（它接受任何字符串，从不拦），所以建、并在预览里列出
+    Absent,
+    /// 写了 range，值是**短的可读字面量**，但我们的四种类型表达不了它
+    ///（`time` 没有年、`duration` 是时长不是时点）。按 `text` 建**并报告**：
+    /// 只丢了排序语义，值还在；跳过则是这条知识彻底不会被捕获，那更糟
+    Degraded(String),
+    /// 写了 range，而**抽取器永远不可能从散文里读出这个值**：二进制块、
+    /// XML 片段、XML 内部标识。跳过它保护不了任何数据（本来就不会有值），
+    /// 省掉的是提示词——每个属性都是抽取提示词里的一行，每个文本块付一遍
+    Unusable(String),
+}
+
+/// 数据属性的 `rdfs:range` → datatype。
+///
+/// 按**完整 IRI** 匹配而不是局部名：自定义词汇表完全可能有个叫 `date` 的类，
+/// 按尾巴匹配会把它当成 `xsd:date`。
+///
+/// 多条 range 一律 [`RangeMapping::Degraded`]——RDFS 里那是**交集**语义
+///（"必须同时是两者"），几乎总是建模笔误，但规范如此，不猜。
+pub fn map_range(ranges: &[String]) -> RangeMapping {
+    match ranges {
+        [] => RangeMapping::Absent,
+        [one] => match datatype_of(one) {
+            Some(dt) => RangeMapping::Datatype(dt),
+            None if unusable(one) => RangeMapping::Unusable(one.clone()),
+            None => RangeMapping::Degraded(one.clone()),
+        },
+        // 多条 range 是交集语义，不猜类型——但值仍是字面量，所以按 text 建
+        many => RangeMapping::Degraded(many.join(" ∩ ")),
+    }
+}
+
+/// 抽取器不可能从散文里读出来的那些：二进制块与 XML 内部管道。
+///
+/// 判据不是"这个值该不该存"——属性值本来就存在图谱里（走 `facts.object_value`，
+/// 证据、时态、审阅全套）。判据是**会不会有值**：「门店每天 9:00 开门」里有
+/// `09:00`，而一张 base64 平面图不会出现在散文里；就算文档里真有一段 base64，
+/// 把它当成事实抽出来也是错的。
+///
+/// **其余一律降级成 text**——一个抽得出来的值，宁可类型糙一点也别让它没处可去。
+fn unusable(iri: &str) -> bool {
+    if let Some(local) = iri.strip_prefix(XSD) {
+        return matches!(
+            local,
+            "base64Binary"
+                | "hexBinary"
+                | "QName"
+                | "NOTATION"
+                | "ID"
+                | "IDREF"
+                | "IDREFS"
+                | "ENTITY"
+                | "ENTITIES"
+        );
+    }
+    if let Some(local) = iri.strip_prefix(RDF_NS) {
+        return local == "XMLLiteral";
+    }
+    false
+}
+
+fn datatype_of(iri: &str) -> Option<&'static str> {
+    if let Some(local) = iri.strip_prefix(XSD) {
+        return match local {
+            // 有界与无符号变体全部收进 number：区别在取值范围，不在语义
+            "decimal" | "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
+            | "positiveInteger" | "nonPositiveInteger" | "negativeInteger" | "unsignedLong"
+            | "unsignedInt" | "unsignedShort" | "unsignedByte" | "double" | "float" => {
+                Some("number")
+            }
+            // 我们的日期格式本就是 YYYY[-MM[-DD]]，逐级可省，所以 gYear / gYearMonth 装得下
+            "date" | "dateTime" | "dateTimeStamp" | "gYear" | "gYearMonth" => Some("date"),
+            "boolean" => Some("bool"),
+            "string" | "normalizedString" | "token" | "language" | "Name" | "NCName"
+            | "NMTOKEN" | "anyURI" => Some("text"),
+            // time / gMonth / gDay / gMonthDay 缺年，duration 系列是时长不是时点 ——
+            // 落到 None，再由 unusable() 分流：它们是可读字面量，降级成 text；
+            // 二进制与 XML 内部标识才是真的不收
+            _ => None,
+        };
+    }
+    if let Some(local) = iri.strip_prefix(RDF_NS) {
+        // XMLLiteral 是 XML 片段，不收
+        return matches!(local, "PlainLiteral" | "langString").then_some("text");
+    }
+    if let Some(local) = iri.strip_prefix(RDFS) {
+        return (local == "Literal").then_some("text");
+    }
+    if let Some(local) = iri.strip_prefix(OWL) {
+        return matches!(local, "real" | "rational").then_some("number");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_maps_every_numeric_variant() {
+        for local in [
+            "decimal",
+            "integer",
+            "int",
+            "long",
+            "short",
+            "byte",
+            "nonNegativeInteger",
+            "positiveInteger",
+            "nonPositiveInteger",
+            "negativeInteger",
+            "unsignedLong",
+            "unsignedInt",
+            "unsignedShort",
+            "unsignedByte",
+            "double",
+            "float",
+        ] {
+            assert_eq!(
+                map_range(&[format!("{XSD}{local}")]),
+                RangeMapping::Datatype("number"),
+                "{local}"
+            );
+        }
+        // owl:real / owl:rational 也在 OWL 2 的 datatype map 里
+        assert_eq!(
+            map_range(&[format!("{OWL}rational")]),
+            RangeMapping::Datatype("number")
+        );
+    }
+
+    /// 我们的日期格式是 YYYY[-MM[-DD]]，逐级可省，所以只缺低位的 g 类型装得下
+    #[test]
+    fn partial_dates_fit_only_when_the_year_is_there() {
+        for local in ["date", "dateTime", "dateTimeStamp", "gYear", "gYearMonth"] {
+            assert_eq!(
+                map_range(&[format!("{XSD}{local}")]),
+                RangeMapping::Datatype("date"),
+                "{local}"
+            );
+        }
+        // 缺年的进不了 date —— 但它们是可读字面量，降级成 text 而不是丢掉
+        for local in ["gMonth", "gDay", "gMonthDay", "time"] {
+            assert!(
+                matches!(
+                    map_range(&[format!("{XSD}{local}")]),
+                    RangeMapping::Degraded(_)
+                ),
+                "{local} 该降级成 text，不该丢"
+            );
+        }
+    }
+
+    /// 分界不是"能不能精确映射"，而是**"这个取值该不该进图谱"**。
+    /// 存得下的一律留下来——类型糙一点，好过这条知识彻底不被捕获。
+    #[test]
+    fn a_value_we_can_store_is_kept_even_when_we_cannot_type_it() {
+        // 没写 range：没有声明可丢，text 是诚实的超集
+        assert_eq!(map_range(&[]), RangeMapping::Absent);
+        // 写了但表达不了：时长是可读字面量，降级成 text 并报告
+        assert!(matches!(
+            map_range(&[format!("{XSD}duration")]),
+            RangeMapping::Degraded(_)
+        ));
+        // 取值本就不该进图谱：二进制块与 XML 片段，这才是真的跳过
+        assert!(matches!(
+            map_range(&[format!("{XSD}base64Binary")]),
+            RangeMapping::Unusable(_)
+        ));
+        assert!(matches!(
+            map_range(&[format!("{RDF_NS}XMLLiteral")]),
+            RangeMapping::Unusable(_)
+        ));
+    }
+
+    /// 多条 range 在 RDFS 里是**交集**（"必须同时是两者"），不是并集。
+    /// 几乎总是建模笔误，但规范如此 —— 不猜。
+    #[test]
+    fn several_ranges_are_an_intersection_we_refuse_to_guess() {
+        let m = map_range(&[format!("{XSD}string"), format!("{XSD}integer")]);
+        match m {
+            // 交集不猜类型，但值仍是字面量，所以按 text 落下来
+            RangeMapping::Degraded(s) => assert!(s.contains('∩')),
+            other => panic!("多条 range 不该被精确映射: {other:?}"),
+        }
+    }
+
+    /// 按完整 IRI 匹配：自定义词汇表里叫 date 的**类**不是 xsd:date
+    #[test]
+    fn a_class_that_happens_to_be_called_date_is_not_a_date() {
+        assert!(matches!(
+            map_range(&["http://acme.example/hr#date".into()]),
+            RangeMapping::Degraded(_)
+        ));
+    }
 
     const TTL: &str = r#"
         @prefix owl: <http://www.w3.org/2002/07/owl#> .
