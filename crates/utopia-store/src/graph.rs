@@ -447,7 +447,7 @@ pub async fn insert_fact(
     object_id: Uuid,
     valid_from: Option<chrono::DateTime<chrono::Utc>>,
     valid_to: Option<chrono::DateTime<chrono::Utc>>,
-    valid_precision: &str,
+    valid_precision: Option<&str>,
     confidence: f32,
 ) -> AppResult<(Uuid, bool)> {
     insert_fact_inner(
@@ -473,7 +473,7 @@ async fn insert_fact_inner(
     object: FactObject<'_>,
     valid_from: Option<chrono::DateTime<chrono::Utc>>,
     valid_to: Option<chrono::DateTime<chrono::Utc>>,
-    valid_precision: &str,
+    valid_precision: Option<&str>,
     confidence: f32,
 ) -> AppResult<(Uuid, bool)> {
     let same_sql = match object {
@@ -586,7 +586,7 @@ pub async fn insert_value_fact(
     object_value: &serde_json::Value,
     valid_from: Option<chrono::DateTime<chrono::Utc>>,
     valid_to: Option<chrono::DateTime<chrono::Utc>>,
-    valid_precision: &str,
+    valid_precision: Option<&str>,
     confidence: f32,
 ) -> AppResult<(Uuid, bool)> {
     insert_fact_inner(
@@ -1322,9 +1322,31 @@ pub async fn graph_changes(
 /// 它连着具体事实，所以采纳一个说法时能直接说"将重新归类 57 条"并真的去改。
 pub async fn proposed_predicates(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<ProposedPredicate>> {
     Ok(sqlx::query_as(
-        "SELECT fe.proposed_predicate AS form,
+        // **普遍程度从全量证据里数，不从积压里数。**
+        //
+        // 下面那些 WHERE 把行集收窄到「还挂在兜底谓词上、还活着、宾语是实体」
+        // ——那是**采纳要改写的东西**，`fact_count` 该这么数。但 `doc_count`
+        // 回答的是另一个问题：这个说法在语料里有多普遍。拿残渣去数它会系统性
+        // 偏低，而且越用越低——说法一旦被采纳、被谓词匹配接住、或被修正作废，
+        // 它的行就离开积压了。一篇一篇往里灌的库尤其吃亏：每轮搬走一批，
+        // 剩下的永远攒不够两篇，本体于是永远长不起来。
+        //
+        // 实测（ai-timeline 348 块）：两种口径下 8 个说法分处门槛两侧，
+        // 按积压数是「只在 1 篇」、按全量数是「≥2 篇」。
+        //
+        // 走 CTE 而不是相关子查询：后者每组重扫一遍证据表，同一份数据上
+        // 360ms 对 7ms。这个函数每次 Suggest 和每次自动扩本体都要跑。
+        "WITH spread AS (
+             SELECT e.proposed_predicate AS form,
+                    count(DISTINCT e.document_id) AS doc_count
+             FROM fact_evidence e
+             JOIN facts ff ON ff.id = e.fact_id
+             WHERE ff.kb_id = $1 AND e.proposed_predicate IS NOT NULL
+             GROUP BY 1
+         )
+         SELECT fe.proposed_predicate AS form,
                 count(DISTINCT f.id) AS fact_count,
-                count(DISTINCT fe.document_id) AS doc_count,
+                max(sp.doc_count) AS doc_count,
                 (SELECT s.canonical_name || ' → ' || o.canonical_name
                  FROM fact_evidence e2
                  JOIN facts f2 ON f2.id = e2.fact_id
@@ -1336,6 +1358,7 @@ pub async fn proposed_predicates(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Pr
          FROM fact_evidence fe
          JOIN facts f ON f.id = fe.fact_id
          JOIN relation_types rt ON rt.id = f.predicate_id
+         JOIN spread sp ON sp.form = fe.proposed_predicate
          WHERE f.kb_id = $1 AND rt.kb_id = $1 AND rt.key = $2
            AND f.invalidated_at IS NULL AND fe.proposed_predicate IS NOT NULL
            -- 字面值宾语的不算：它们也挂在兜底谓词上、也带表层谓词，但要的是
@@ -1351,6 +1374,41 @@ pub async fn proposed_predicates(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Pr
     )
     .bind(kb_id)
     .bind(FALLBACK_RELATION_KEY)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// 每个待认领说法出现在**哪些文档**里。
+///
+/// [`proposed_predicates`] 已经给了 `doc_count`，但采纳那条路要先按屈折基把说法
+/// 归并（`sued` 与 `sues` 是一个关系），归并之后的篇数是**并集**而不是相加——
+/// 同一篇文档完全可能两种写法都用过，相加就成了重复计数，一篇文档能把一个说法
+/// 顶过「≥2 篇」的门槛。
+///
+/// **不筛兜底谓词。** 这条查询与 [`proposed_predicates`] 回答的是两个问题：
+/// 那条问「还有哪些说法等着被采纳」，看的是积压；这条问「这个说法有多普遍」，
+/// 看的是全量证据，条件与它内部那个 `spread` CTE 一致。
+///
+/// 第一版照抄了 `rt.key = 'related_to'`，理由写的是「两处条件要一致」——错的。
+/// 那样数出来的还是残渣：说法一旦被采纳、被谓词匹配接住、或被修正作废，
+/// 它的行就离开积压，篇数随之下降。一篇一篇往里灌的库因此永远攒不够两篇。
+/// 测试当场抓住了（两篇里只回来一篇）。
+pub async fn proposed_predicate_documents(
+    pool: &PgPool,
+    kb_id: Uuid,
+) -> AppResult<Vec<(String, Uuid)>> {
+    Ok(sqlx::query_as(
+        "SELECT DISTINCT fe.proposed_predicate, fe.document_id
+         FROM fact_evidence fe
+         JOIN facts f ON f.id = fe.fact_id
+         WHERE f.kb_id = $1
+           AND fe.proposed_predicate IS NOT NULL
+           AND fe.document_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM ontology_misses m
+                           WHERE m.kb_id = $1 AND m.kind = 'relation_type'
+                             AND m.key = fe.proposed_predicate AND m.dismissed_at IS NOT NULL)",
+    )
+    .bind(kb_id)
     .fetch_all(pool)
     .await?)
 }
@@ -1599,9 +1657,19 @@ pub async fn proposed_attributes(
     kb_id: Uuid,
 ) -> AppResult<Vec<utopia_core::models::ProposedAttribute>> {
     Ok(sqlx::query_as(
-        "SELECT fe.proposed_predicate AS form,
+        // 同 proposed_predicates：普遍程度从全量证据数，改写量从积压数；
+        // 走 CTE 而不是相关子查询，后者每组重扫一遍证据表
+        "WITH spread AS (
+             SELECT e.proposed_predicate AS form,
+                    count(DISTINCT e.document_id) AS doc_count
+             FROM fact_evidence e
+             JOIN facts ff ON ff.id = e.fact_id
+             WHERE ff.kb_id = $1 AND e.proposed_predicate IS NOT NULL
+             GROUP BY 1
+         )
+         SELECT fe.proposed_predicate AS form,
                 count(DISTINCT f.id) AS fact_count,
-                count(DISTINCT fe.document_id) AS doc_count,
+                max(sp.doc_count) AS doc_count,
                 (SELECT f2.object_value::text
                  FROM fact_evidence e2
                  JOIN facts f2 ON f2.id = e2.fact_id
@@ -1621,6 +1689,7 @@ pub async fn proposed_attributes(
          FROM fact_evidence fe
          JOIN facts f ON f.id = fe.fact_id
          JOIN relation_types rt ON rt.id = f.predicate_id
+         JOIN spread sp ON sp.form = fe.proposed_predicate
          WHERE f.kb_id = $1 AND rt.kb_id = $1 AND rt.key = $2
            AND f.invalidated_at IS NULL AND fe.proposed_predicate IS NOT NULL
            AND f.object_id IS NULL

@@ -3,6 +3,7 @@
 //! 消解灰区只入审核队列并触发独立的攒批裁决任务——LLM 裁决永不阻塞本任务。
 
 use crate::llm_util;
+use crate::predicate_match::PredicateIndex;
 use crate::state::AppState;
 use std::collections::{HashMap, HashSet};
 use utopia_store::graph::FALLBACK_RELATION_KEY;
@@ -31,6 +32,30 @@ async fn drop_signal(
     .await;
 }
 
+/// 自动扩本体的唯一入队点。**成功与失败两条路都要走到它。**
+///
+/// 开关在这里重读，而不是沿用调用方手上那份：失败路径压根没加载过 kb，
+/// 而成功路径那份是文档**开抽时**读的——一篇 73 块的文档要跑一个多小时，
+/// 期间有人在设置里关掉了开关，沿用旧值就是拿一小时前的意图办事。
+async fn enqueue_bootstrap(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
+    if !utopia_store::kbs::get(&state.pool, kb_id)
+        .await?
+        .auto_extend_ontology
+    {
+        return Ok(());
+    }
+    if !utopia_store::documents::extraction_idle(&state.pool, kb_id).await? {
+        return Ok(());
+    }
+    utopia_store::jobs::enqueue(
+        &state.pool,
+        "bootstrap_ontology",
+        serde_json::json!({ "kb_id": kb_id }),
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn extract_document(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
     match run(state, document_id).await {
         Ok(()) => Ok(()),
@@ -44,6 +69,17 @@ pub async fn extract_document(state: &AppState, document_id: Uuid) -> anyhow::Re
             .await;
             if let Ok(doc) = utopia_store::documents::get(&state.pool, document_id).await {
                 state.emit_document(doc.kb_id, document_id);
+                // **失败也要触发自动扩本体。**
+                //
+                // 入队从前只写在成功路径上，于是这一串会把知识库永久卡住：
+                // 前 14 篇成功（每篇都看到还有别的在飞，不触发），第 15 篇重试
+                // 耗尽变 failed —— 这时 extraction_idle 恰好为真（failed 不算
+                // queued/extracting），可**再没有任何一篇文档会完成来做这次检查**。
+                // 结果是提案堆在池子里、本体永远停在种子那几个关系、半张图永远是
+                // 兜底谓词，而界面上没有任何东西说这件事发生过。
+                //
+                // 任务本身幂等且会重查开关与门槛，所以这里多入队一次是安全的。
+                let _ = enqueue_bootstrap(state, doc.kb_id).await;
             }
             Err(e)
         }
@@ -123,6 +159,13 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
         .collect();
     let type_ids: HashMap<&str, Uuid> = etypes.iter().map(|t| (t.key.as_str(), t.id)).collect();
     let rel_ids: HashMap<&str, Uuid> = rtypes.iter().map(|r| (r.key.as_str(), r.id)).collect();
+    // 模型说出的谓词往本体已有关系上落：写法、时态、被动都对齐（见 predicate_match）。
+    // 没有它的时候，`produces` 明明在词表里，模型写 `produced_by` 就被降级扔了
+    let pred_index = PredicateIndex::build(&rtypes);
+    // 「本体认不认识这个说法」——字面值那一档与关系那一档必须用同一个判据。
+    // 分开写的话，模糊匹配得上的谓词会先被字面值那一档当成属性分流走，
+    // 同一个词在两条路上得到相反的回答
+    let known_predicate = |p: &str| rel_ids.contains_key(p) || pred_index.lookup(p).is_some();
     // 时态对账只对带唯一性约束的状态关系生效（本体元数据）：(functional, inverse_functional, temporal)
     let rel_meta: HashMap<Uuid, (bool, bool, String)> = rtypes
         .iter()
@@ -339,7 +382,11 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
             }
             let from = f.valid_from.as_deref().and_then(utopia_extract::parse_time);
             let to = f.valid_to.as_deref().and_then(utopia_extract::parse_time);
-            let precision = from.map(|(_, p)| p).unwrap_or("day");
+            // **两端都没日期就没有精度可言。** 从前这里 unwrap_or("day")，
+            // 于是一条完全没有时间的事实也带着"精确到日"落库——实测这类活行
+            // ai-timeline 有 843 条、国情咨文 728 条，全在说假话（迁移 0045）。
+            // 起始那端优先；只有结束日期时（"直到 2023 年"）精度描述的是它
+            let precision = from.map(|(_, p)| p).or_else(|| to.map(|(_, p)| p));
 
             // 属性事实：谓词命中属性 → 字面值通道。datatype 校验失败宁缺勿脏；
             // domain 校验（含子类上溯）挡住"把 salary 挂到 Organization"这类张冠李戴。
@@ -500,12 +547,12 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
             // 文本值的属性（schema.org 里 323 个）在这一档仍会变成实体——
             // 那里没有可靠判据，猜错会吃掉真实体，不猜
             let literal = match (&f.value, f.object.as_deref().map(str::trim)) {
-                (Some(v), None | Some("")) if !rel_ids.contains_key(f.predicate.as_str()) => {
+                (Some(v), None | Some("")) if !known_predicate(f.predicate.as_str()) => {
                     Some(v.clone())
                 }
                 (_, Some(o))
                     if !o.is_empty()
-                        && !rel_ids.contains_key(f.predicate.as_str())
+                        && !known_predicate(f.predicate.as_str())
                         && !entity_ids.contains_key(o)
                         && looks_literal(o) =>
                 {
@@ -622,11 +669,11 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
             if subject_id == object_id {
                 continue;
             }
-            // 未知关系降级为 related_to，并记入未匹配统计。
-            // 降级会把原意抹平成"有关联"——原词写进证据行的 proposed_predicate，
-            // 是这条事实身上唯一还留着原意的地方（谓词消解据此把它映射回本体）
-            let predicate_id = match rel_ids.get(f.predicate.as_str()) {
-                Some(id) => *id,
+            // 先尽量落到本体已有的关系上（写法/时态/被动），**落不上才降级**为 related_to
+            // 并记入未匹配统计。降级会把原意抹平成"有关联"——原词写进证据行的
+            // proposed_predicate，是这条事实身上唯一还留着原意的地方（谓词消解据此映射回本体）
+            let (predicate_id, swap) = match pred_index.lookup(f.predicate.as_str()) {
+                Some(hit) => hit,
                 None => {
                     let _ = utopia_store::ontology::record_miss(
                         &state.pool,
@@ -637,7 +684,7 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
                     )
                     .await;
                     match related_rel {
-                        Some(id) => id,
+                        Some(id) => (id, false),
                         // 本体里连兜底关系都被删了 → 整条事实消失，这个必须说出来
                         None => {
                             drop_signal(
@@ -653,6 +700,14 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
                         }
                     }
                 }
+            };
+            // 被动说法命中的是同一条边的反向：`ChatGPT produced_by OpenAI` 与
+            // `OpenAI produces ChatGPT` 是同一条边，存的时候要按本体的方向来，
+            // 否则它跟已有的那 130 条 produces 各存各的，图上是两条相反的箭头
+            let (subject_id, object_id) = if swap {
+                (object_id, subject_id)
+            } else {
+                (subject_id, object_id)
             };
 
             {
@@ -757,16 +812,7 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
     // 推错的后果很荒唐（在提案上点一次 Add 就永久关掉建议），而且一旦为假
     // 就永不再真，本体会冻结在第一批文档碰巧包含的词汇上。
     // 并发下可能入队两次，任务自己会重查开关与状态
-    if kb.auto_extend_ontology
-        && utopia_store::documents::extraction_idle(&state.pool, doc.kb_id).await?
-    {
-        utopia_store::jobs::enqueue(
-            &state.pool,
-            "bootstrap_ontology",
-            serde_json::json!({ "kb_id": doc.kb_id }),
-        )
-        .await?;
-    }
+    enqueue_bootstrap(state, doc.kb_id).await?;
 
     tracing::info!(%document_id, facts = fact_count, "图谱抽取完成");
     Ok(())
