@@ -9,7 +9,7 @@ use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
-use utopia_core::models::{ChunkView, EntityFact, Role};
+use utopia_core::models::{ChunkView, EntityFact, GraphChange, Role};
 use utopia_core::AppError;
 use utopia_llm::tool_result_message;
 use uuid::Uuid;
@@ -28,6 +28,10 @@ const MAX_HISTORY: usize = 20;
 const MAX_ROUNDS: usize = 6;
 const SEARCH_TOP_K: usize = 6;
 const TOOL_CHUNK_CHARS: usize = 800;
+/// 一次 changes 最多回多少条。刚灌完的库里 asserted 是成百上千条，全发出去
+/// 只会把上下文填满而不增加信息——有信息量的是 corrected/rejected，那类事件
+/// 本来就稀少。截断时 detail 写 "40+"，模型据此知道该收窄窗口
+const CHANGES_LIMIT: i64 = 40;
 
 #[derive(Deserialize)]
 pub struct ChatReq {
@@ -189,14 +193,52 @@ fn base_tools() -> serde_json::Value {
                     "required": ["entity_id"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "changes",
+                "description": "What the graph LEARNED or REVISED in a window of record time —                     the belief axis. Answers \"what changed since X\", \"what did we get wrong\",                     \"what is new this quarter\", and needs no entity, so use it when the                     question names a period rather than a subject.                     Events: asserted (new claim), corrected (a claim replaced by a revised one),                     rejected (a claim withdrawn), merged (folded into another claim) — each with                     the document it came from.                     NOT the same axis as entity_facts(at): that asks \"what was true on date D\";                     this asks \"what did we change our mind about between D1 and D2\". A fact                     about 2019 can be recorded in 2026 — this windows on when we recorded it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "since": {
+                            "type": "string",
+                            "description": "Start of the window (YYYY-MM-DD), inclusive."
+                        },
+                        "until": {
+                            "type": "string",
+                            "description": "End of the window (YYYY-MM-DD), inclusive of that                                 whole day. Omit for 'up to now'."
+                        },
+                        "entity_id": {
+                            "type": "string",
+                            "description": "Optional entity id from find_entities, to narrow the                                 window to changes touching that one entity."
+                        },
+                        "kinds": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["asserted", "corrected", "rejected", "merged"]
+                            },
+                            "description": "Optional filter. A freshly ingested corpus is nearly                                 all 'asserted'; pass [\"corrected\", \"rejected\"] to isolate                                 the places we actually changed our mind."
+                        }
+                    },
+                    "required": ["since"]
+                }
+            }
         }
     ])
 }
 
 const SYSTEM_PROMPT: &str = "You are the assistant of Utopia, a temporal knowledge platform. \
-    You have tools: search_chunks (document search), find_entities and entity_facts (a \
-    bi-temporal knowledge graph where every relation carries a validity range), and \
-    search_docs (Utopia's own manual, the Charter).\n\
+    You have tools: search_chunks (document search), find_entities, entity_facts and \
+    changes (a bi-temporal knowledge graph), and search_docs (Utopia's own manual, the \
+    Charter).\n\
+    The graph has TWO independent time axes, and each graph tool reads exactly one:\n\
+    - World time — when something was true. Read with entity_facts (`at` = as of that date).\n\
+    - Record time — when we came to believe it, and when we revised it. Read with changes.\n\
+    \"Who was CTO in 2019\" is world time; \"what did we learn last month\" and \"what did \
+    we get wrong\" are record time. The same fact has a position on both.\n\
     Boundary: search_docs answers questions about Utopia itself (features, ingestion, \
     permissions, what fields like 'missing' or validity ranges mean); the other tools answer \
     questions about the knowledge stored in it. Never mix the manual into answers about the \
@@ -210,6 +252,10 @@ const SYSTEM_PROMPT: &str = "You are the assistant of Utopia, a temporal knowled
     2. Facts carry validity ranges (from → to). For \"as of <date>\" questions pass `at` to \
        entity_facts and the server filters to that moment; for history questions omit `at` \
        to see the full timeline. State dates in the answer.\n\
+    2b. For \"what changed / what is new / what did we get wrong since <date>\", call changes — \
+       it needs no entity. Name the document a correction came from in plain prose. Graph tools \
+       return no [n] numbers and no URLs, so never write a bracketed citation or a placeholder \
+       like [Link] after one — the document's name IS the attribution.\n\
     3. Several entities can share one name — check the disambiguator and pick the right one; \
        if genuinely ambiguous, ask the user which one they mean.\n\
     4. Stop calling tools as soon as you have enough evidence. Then answer concisely: cite \
@@ -619,6 +665,50 @@ pub async fn chat(
                             ),
                         }
                     }
+                    "changes" => {
+                        let day = |k: &str| {
+                            args[k]
+                                .as_str()
+                                .and_then(|s| chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok())
+                        };
+                        match changes_window(day("since"), day("until"), chrono::Utc::now()) {
+                            None => (
+                                "Invalid or missing `since` (expected YYYY-MM-DD).".to_string(),
+                                json!({ "kind": "changes", "label": "?", "detail": "invalid since" }),
+                            ),
+                            Some((since, until, window)) => {
+                                let entity = args["entity_id"]
+                                    .as_str()
+                                    .and_then(|s| s.parse::<Uuid>().ok());
+                                let kinds: Option<Vec<String>> = args["kinds"].as_array().map(|a| {
+                                    a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()
+                                });
+                                let kinds = kinds.filter(|k: &Vec<String>| !k.is_empty());
+                                let rows = utopia_store::graph::graph_changes(
+                                    &state.pool,
+                                    kb_id,
+                                    since,
+                                    until,
+                                    entity,
+                                    kinds.as_deref(),
+                                    CHANGES_LIMIT,
+                                )
+                                .await
+                                .unwrap_or_default();
+                                let text = if rows.is_empty() {
+                                    format!("No recorded changes in {window}.")
+                                } else {
+                                    rows.iter().map(change_line).collect::<Vec<_>>().join("\n")
+                                };
+                                let detail = if rows.len() as i64 == CHANGES_LIMIT {
+                                    format!("{CHANGES_LIMIT}+ changes")
+                                } else {
+                                    format!("{} changes", rows.len())
+                                };
+                                (text, json!({ "kind": "changes", "label": window, "detail": detail }))
+                            }
+                        }
+                    }
                     "query_data" if !mounted_sources.is_empty() => {
                         let ds_name = args["data_source"].as_str().map(str::trim).unwrap_or("");
                         let sql = args["sql"].as_str().map(str::trim).unwrap_or("");
@@ -799,6 +889,86 @@ fn fact_line(f: &EntityFact) -> String {
     format!("{core}{range} [{}%]", (f.confidence * 100.0).round() as i32)
 }
 
+/// changes 的时间窗：把两个可选日期变成 (SQL 用的半开区间, 展示用的窗口串)。
+///
+/// **抽成纯函数是因为这里出过一次错。** `until` 进 SQL 前要加一天（说"到 3 月 31 日
+/// 为止"的人要的是含 31 日，而 SQL 那头是 `< $3`），第一版把加过一天的值也印进了
+/// 展示串，模型于是照着答"截至 8 月 30 日"——问的是 29 日。两个值必须一起算、
+/// 一起被测住；分在两处写，迟早再次分叉。
+///
+/// `now` 从外面传进来而不是在里面取，纯粹是为了这个函数测得动。
+fn changes_window(
+    since: Option<chrono::NaiveDate>,
+    until: Option<chrono::NaiveDate>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+    String,
+)> {
+    let from = since?;
+    let start = from.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let end = until
+        .and_then(|d| d.succ_opt())
+        .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
+        .unwrap_or(now);
+    // 展示用的是**问的那天**，没问就写 now——绝不是 end
+    let label = format!(
+        "{} → {}",
+        from.format("%Y-%m-%d"),
+        match until {
+            Some(d) => d.format("%Y-%m-%d").to_string(),
+            None => "now".to_string(),
+        }
+    );
+    Some((start, end, label))
+}
+
+/// 认知轴上的一行。
+///
+/// 排版把两根轴**分开写**：`at` 前面标事件类型，世界轴的区间夹在括号里跟在断言后。
+/// 若把它们排成一串日期，模型会把"2026 年记下的"读成"2026 年发生的"——那正是
+/// 这个工具要防的误读。
+fn change_line(c: &GraphChange) -> String {
+    let object = match (&c.object_name, &c.object_value) {
+        (Some(name), _) => name.clone(),
+        (None, Some(v)) => match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        },
+        (None, None) => "?".to_string(),
+    };
+    let range = match (&c.valid_from, &c.valid_to) {
+        (Some(from), Some(to)) => {
+            format!(
+                " [valid {} → {}]",
+                from.format("%Y-%m-%d"),
+                to.format("%Y-%m-%d")
+            )
+        }
+        (Some(from), None) => format!(" [valid {} → now]", from.format("%Y-%m-%d")),
+        (None, Some(to)) => format!(" [valid → {}]", to.format("%Y-%m-%d")),
+        (None, None) => String::new(),
+    };
+    // 文件名不带 [n]：引证编号是 chunk 的，这里只有 document，发一个编号出去
+    // 会在界面上落成一条指不到东西的引证
+    let src = match (&c.filename, &c.quote) {
+        (Some(f), Some(q)) => format!(" — from \"{f}\": \"{}\"", truncate(q, 160)),
+        (Some(f), None) => format!(" — from \"{f}\""),
+        _ => String::new(),
+    };
+    format!(
+        "{} {}: {} {} {}{}{}",
+        c.at.format("%Y-%m-%d"),
+        c.kind,
+        c.subject_name,
+        c.predicate_label,
+        object,
+        range,
+        src
+    )
+}
+
 /// 降级路径的系统提示（tool-calling 不可用时的一次性注入）。
 fn legacy_system_prompt(chunks: &[ChunkView]) -> String {
     if chunks.is_empty() {
@@ -873,4 +1043,122 @@ pub async fn delete_conversation(
     utopia_store::access::require_kb(&state.pool, &user, kb_id, Role::Viewer).await?;
     utopia_store::conversations::delete(&state.pool, kb_id, user.id, conversation_id).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(s: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+    fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
+        s.parse().unwrap()
+    }
+
+    // --- changes_window -----------------------------------------------------
+
+    /// 说"到 3 月 31 日为止"的人要的是**含 31 日**。SQL 那头是 `< end`，
+    /// 所以 end 必须落在 4 月 1 日零点——差这一天，问 31 日会安静地丢掉 31 日
+    #[test]
+    fn until_names_a_day_the_window_must_contain() {
+        let (start, end, label) = changes_window(
+            Some(d("2026-03-01")),
+            Some(d("2026-03-31")),
+            t("2026-06-01T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(start, t("2026-03-01T00:00:00Z"));
+        assert_eq!(end, t("2026-04-01T00:00:00Z"));
+        // 但**展示串里绝不能出现 04-01**：那是半开区间的内部细节，
+        // 印出去等于告诉模型窗口比它要的宽一天，模型会照着答（这条真的发生过）
+        assert_eq!(label, "2026-03-01 → 2026-03-31");
+    }
+
+    /// 没给 until 时，展示串写 now。写成 end 的格式化结果就等于把服务器时钟
+    /// 当成用户问的边界——看着像个精确答案，其实只是"现在几点"
+    #[test]
+    fn an_open_window_says_now_rather_than_the_clock() {
+        let now = t("2026-06-01T13:45:00Z");
+        let (_, end, label) = changes_window(Some(d("2026-03-01")), None, now).unwrap();
+        assert_eq!(end, now);
+        assert_eq!(label, "2026-03-01 → now");
+    }
+
+    #[test]
+    fn without_since_there_is_no_window() {
+        assert!(changes_window(None, Some(d("2026-03-31")), t("2026-06-01T00:00:00Z")).is_none());
+    }
+
+    // --- change_line --------------------------------------------------------
+
+    fn change(kind: &str) -> GraphChange {
+        GraphChange {
+            fact_id: Uuid::nil(),
+            at: t("2026-08-28T10:00:00Z"),
+            kind: kind.to_string(),
+            subject_id: Uuid::nil(),
+            subject_name: "Acme".to_string(),
+            predicate_label: "founded in".to_string(),
+            object_name: None,
+            object_value: None,
+            valid_from: None,
+            valid_to: None,
+            valid_precision: "day".to_string(),
+            confidence: 0.9,
+            document_id: None,
+            filename: None,
+            quote: None,
+        }
+    }
+
+    /// 字面值要读成它自己。走 `Value::to_string()` 会把字符串连引号一起印出来，
+    /// 模型于是把 `"1993"` 当成答案的一部分
+    #[test]
+    fn a_literal_value_reads_as_itself_not_as_json() {
+        let mut c = change("asserted");
+        c.object_value = Some(serde_json::json!("1993"));
+        assert!(
+            change_line(&c).ends_with("Acme founded in 1993"),
+            "{}",
+            change_line(&c)
+        );
+    }
+
+    /// 两根轴必须在同一行里**看得出是两样东西**：记录时刻在前、无标签，
+    /// 世界轴区间在后、带 `valid` 字样。排成一串裸日期，模型会把
+    /// "2026 年记下的"读成"2026 年发生的"——这个工具存在的理由就是防这个
+    #[test]
+    fn the_record_time_and_the_valid_range_do_not_read_as_one_date_run() {
+        let mut c = change("corrected");
+        c.object_name = Some("Berlin".to_string());
+        c.predicate_label = "headquartered in".to_string();
+        c.valid_from = Some(t("2019-01-01T00:00:00Z"));
+        let line = change_line(&c);
+        assert!(line.starts_with("2026-08-28 corrected: "), "{line}");
+        assert!(line.contains("[valid 2019-01-01 → now]"), "{line}");
+    }
+
+    /// 没有证据就什么都别说。凭空补一句 from "…" 会让一条无出处的断言
+    /// 看起来有出处
+    #[test]
+    fn a_fact_with_no_evidence_claims_no_document() {
+        let mut c = change("rejected");
+        c.object_name = Some("Berlin".to_string());
+        assert!(!change_line(&c).contains("from"), "{}", change_line(&c));
+    }
+
+    #[test]
+    fn evidence_carries_the_filename_and_the_quote() {
+        let mut c = change("corrected");
+        c.object_name = Some("Berlin".to_string());
+        c.filename = Some("annual-report.pdf".to_string());
+        c.quote = Some("moved its head office to Berlin".to_string());
+        let line = change_line(&c);
+        assert!(line.contains("from \"annual-report.pdf\""), "{line}");
+        assert!(
+            line.contains("\"moved its head office to Berlin\""),
+            "{line}"
+        );
+    }
 }
