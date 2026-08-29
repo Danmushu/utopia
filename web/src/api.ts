@@ -557,12 +557,56 @@ export interface ConversationMessage {
   created_at: string;
 }
 
+/** 告警中心的一组（0005）：**连着的、同类的几次故障**。
+ *
+ * 存储那边仍是一次故障一行，折叠在服务端读的时候做——这样翻页数的是组，
+ * 一段连续故障不会被页边界切断。 */
+export type AlertGroup = {
+  kb_id: string | null;
+  /** 系统级告警没有库名 */
+  kb_name: string | null;
+  /** `source.sync_failed` / `llm.unreachable` —— 措辞在 i18n 里按这个查 */
+  kind: string;
+  severity: "info" | "warning" | "error";
+  /** 这一组几次 */
+  count: number;
+  /** 其中我没读过的几次 */
+  unread: number;
+  latest_at: string;
+  /** 跟 latest_at 一起圈出这一组，标已读时原样发回去 */
+  earliest_at: string;
+  /** 明细，最多几条，新的在前 */
+  lines: { name?: string; error?: string; job?: string }[];
+};
+
 export const api = {
   health: () =>
     request<{ status: string; name: string; version: string }>(
       "/api/v1/health",
     ),
   me: () => request<User>("/api/v1/auth/me"),
+  alerts: (o: { q?: string; limit?: number; offset?: number }) => {
+    const p = new URLSearchParams();
+    if (o.q?.trim()) p.set("q", o.q.trim());
+    if (o.limit != null) p.set("limit", String(o.limit));
+    if (o.offset) p.set("offset", String(o.offset));
+    return request<{ items: AlertGroup[]; total: number }>(
+      `/api/v1/alerts?${p}`,
+    );
+  },
+  alertsUnread: () => request<{ unread: number }>("/api/v1/alerts/unread"),
+  alertReadGroup: (g: {
+    kb_id: string | null;
+    kind: string;
+    from: string;
+    to: string;
+  }) =>
+    request<{ marked: number }>("/api/v1/alerts/read-group", {
+      method: "POST",
+      body: JSON.stringify(g),
+    }),
+  alertsReadAll: () =>
+    request<{ ok: boolean }>("/api/v1/alerts/read-all", { method: "POST" }),
   login: (email: string, password: string) =>
     request<{ user: User }>("/api/v1/auth/login", {
       method: "POST",

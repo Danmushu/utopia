@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use utopia_core::models::{Source, SourceView, SyncRun};
+use utopia_core::models::{Role, Source, SourceView, SyncRun};
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
@@ -232,24 +232,51 @@ pub async fn mark_running(pool: &PgPool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
+/// 一次同步收尾。失败时记一条告警，成功时什么都不做——
+/// **"现在好了没有"不是告警中心该回答的问题**，来源页面上就写着。
+///
+/// 返回值是"记了没有"，调用方据此决定要不要推事件。
 pub async fn finish_sync(
     pool: &PgPool,
     id: Uuid,
     error: Option<&str>,
     added: i32,
-) -> AppResult<()> {
-    sqlx::query(
+) -> AppResult<bool> {
+    let row: Option<(Uuid, String)> = sqlx::query_as(
         "UPDATE sources SET last_sync_status = $2, last_sync_error = $3,
                 last_sync_added = $4, last_sync_at = now()
-         WHERE id = $1",
+         WHERE id = $1
+         RETURNING kb_id, name",
     )
     .bind(id)
     .bind(if error.is_some() { "failed" } else { "ok" })
     .bind(error)
     .bind(added)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(())
+    let Some((kb_id, name)) = row else {
+        return Ok(false);
+    };
+    let Some(msg) = error else {
+        return Ok(false);
+    };
+    crate::alerts::raise(
+        pool,
+        crate::alerts::NewAlert {
+            kb_id: Some(kb_id),
+            severity: "error",
+            kind: crate::alerts::kind::SOURCE_SYNC_FAILED,
+            // 内容类给 editor，不只给 admin：管理员需要知道该修连接了，
+            // 但**配这个源的人**更需要知道你的东西没进来
+            min_role: Role::Editor,
+            subject_type: Some("source"),
+            subject_id: Some(id),
+            // 名字存一份：源被删之后 subject_id 解析不出名字，而告警该留得住
+            detail: serde_json::json!({ "name": name, "error": msg }),
+        },
+    )
+    .await?;
+    Ok(true)
 }
 
 /// 文档打标签（整组替换）。

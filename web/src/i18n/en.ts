@@ -121,6 +121,38 @@ export const en = {
     searchPlaceholder: "Search the docs…",
     noResults: "No matches.",
   },
+  // 告警的措辞在客户端，按 kind 查——服务端只发 kind 与 detail，
+  // 不产出展示文案（docs/decisions/0004）
+  alerts: {
+    title: "Alerts",
+    badgeLabel: "Alerts",
+    empty: "Nothing needs attention",
+    emptyHint:
+      "Ingestion, sync and model failures show up here instead of only in the logs.",
+    markAllRead: "Mark all read",
+    close: "Close",
+    // 说清搜的是什么：标题的措辞在客户端，服务端搜不到它，
+    // 所以别让人以为输入 "sync failed" 会有结果
+    searchPlaceholder: "Search sources, knowledge bases, errors",
+    noMatch: "Nothing matches",
+    andMore: (n: number) => `and ${n} more`,
+    system: "System",
+    // kind → 一句说清出了什么事。第二句说该做什么——这才是告警比日志多出来的东西。
+    // **一条告警就是一次故障**，所以标题里没有数量
+    kinds: {
+      "source.sync_failed": {
+        title: "A source failed to sync",
+        hint: "Nothing new came in from it. Check the source's settings.",
+      },
+      "llm.unreachable": {
+        title: "The model endpoint gave no usable answer",
+        hint: "Extraction and embedding are stopped. Check the endpoint URL in system settings.",
+      },
+    } as Record<string, { title: string; hint: string } | undefined>,
+    // 没见过的 kind 也要能显示：新告警源上线时前端可能还没更新
+    unknownKind: (kind: string) => kind,
+  },
+
   nav: {
     workspaceLabel: "Workspace",
     kbLabel: "Knowledge base",
@@ -481,8 +513,10 @@ export const en = {
     searchEntity: "Search entities…",
     searchInSubgraph: "Search in subgraph…",
     backToOverview: "← Full graph",
+    // 顺序不是随便排的：模型没配好之前，上传的文档只会排队等着，
+    // 一个实体也抽不出来。先配模型，再传文档
     emptyBody:
-      "The graph is empty. Upload documents and configure a chat model in Settings — entities and relations are extracted automatically.",
+      "The graph is empty. Configure a chat model in Settings first, then upload documents in the Library — entities and relations are extracted automatically.",
     facts: "facts",
     noFacts: "No facts for this entity yet",
     confidence: "confidence",
