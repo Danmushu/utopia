@@ -1,28 +1,49 @@
-# 安全说明
+# Security
 
-Utopia 目前是 v0.1。下面这些是**已知的、尚未解决的**限制 —— 不是漏洞报告，是设计上还没走到的地方。把它们写在这里，是因为一个卖点是「每条结论都可追溯」的项目，没有理由对自己的短板含糊。
+*[中文版](SECURITY.zh-CN.md)*
 
-## 部署到公网之前
+Utopia is at v0.1. Below are the **known, unresolved** limits — not a vulnerability report,
+but the places the design has not reached yet.
 
-### 凭据在数据库里是明文的
+## Before you put this on a public network
 
-界面里录入的 LLM API Key、以及问数功能注册的数据库连接串，都以明文存在 Postgres 里。
+**Credentials are stored in the clear.** LLM API keys and Ask-the-Data connection strings
+are plain text in Postgres (`llm_settings.chat_api_key`, `data_sources.conn_string`). Anyone
+who can read the database can read them. Encryption at rest is a 1.0 item; until then, keep
+the system and its database inside a trusted network.
 
-能读到库的人就能拿到它们。静态加密是 1.0 之前的硬化项 —— 在那之前，请把这套系统和它的数据库部署在可信网络内，并且给数据库单独的访问控制。
+**The default database password is `utopia`.** By default the port binds to loopback
+(`127.0.0.1:1517`), so nothing outside the host can connect. If you change `UTOPIA_DB_BIND`
+to expose it, change `UTOPIA_DB_PASSWORD` in `.env` first.
 
-### 数据库默认口令
+**A data source is only as safe as its grants.** Registering one is a deployment-level
+action, but the connection string reaches every workspace the source is granted to. Grant it
+only where that database should be visible, and use a read-only database role in the string
+itself — the SQL gate below is defence in depth, not a substitute for least privilege at the
+source.
 
-compose 里数据库默认口令是 `utopia`。默认配置下端口只绑回环（`127.0.0.1:1517`），外网连不上，所以这不是紧急问题；但如果你改了 `UTOPIA_DB_BIND` 把它暴露出去，先换掉 `.env` 里的 `UTOPIA_DB_PASSWORD`。
+## What is in place
 
-## 已经做了的
+- **JWT signing key generated on first start** — 32 bytes from a CSPRNG, stored in the
+  database. No deployment shares a default key.
+- **`Secure` on session cookies behind TLS** — decided from `X-Forwarded-Proto`, so local
+  HTTP development still works. Force it with `UTOPIA_COOKIE_SECURE=true` if your proxy
+  omits the header.
+- **Database port bound to loopback** — `127.0.0.1:1517`; the app reaches the database over
+  the compose network.
+- **Optional least-privilege runtime role** — set `UTOPIA_APP_DB_PASSWORD` and
+  `UTOPIA_MIGRATION_URL`, and the app connects as a role that can only read and write
+  business tables and append to the ledger, while migrations run as the owner.
+- **Data sources reach only granted workspaces** — a registered database is mounted into a
+  knowledge base only where an explicit grant exists. Before this, any base admin could
+  mount any registered source, which crossed tenants.
+- **Read-only gate on Ask-the-Data** — parser allowlist, read-only transaction, enforced row
+  limit; three layers, so a statement past the parser still cannot write.
+- **Accounts are deactivated, not deleted** — `users.deactivated_at` blocks sign-in while the
+  ledger keeps that person's decisions attributable.
+- **Passwords hashed with argon2.**
 
-- **JWT 签名密钥自动生成**：首次启动生成 32 字节 CSPRNG 存入数据库，不再有「所有部署共用同一个默认密钥」这回事。
-- **会话 cookie 在 TLS 后面自动打 Secure**：按请求的 `X-Forwarded-Proto` 判定，走 HTTPS 就打上，浏览器不会再把 token 经明文链路发出去。没有反向代理时不打，本地 HTTP 开发照常。代理不发那个头的话，用 `UTOPIA_COOKIE_SECURE=true` 强制打开。
-- **数据库端口只绑回环**：`127.0.0.1:1517`，app 走 compose 内网连库，那个映射只服务本地开发。
-- **可选的受限运行角色**：配置 `UTOPIA_APP_DB_PASSWORD` 与 `UTOPIA_MIGRATION_URL` 后，应用以只读写业务表、对台账只增不改的角色连库，迁移另走 owner 身份。
-- **问数 SQL 只读闸**：解析白名单、只读事务、强制行数上限。
-- **口令哈希用 argon2**。
+## Reporting a vulnerability
 
-## 报告漏洞
-
-发现了上面没有列出的问题，请开一个 issue。如果涉及可被利用的细节，先只写复现的最小信息，我们再私下沟通完整内容。
+Open an issue. If it involves exploitable detail, start with the minimum needed to reproduce
+and we will follow up privately.
