@@ -12,7 +12,8 @@ use crate::auth::AuthUser;
 use crate::error::ApiResult;
 use crate::state::AppState;
 
-const LOW_CONFIDENCE_BELOW: f32 = 0.75;
+/// 一页多少条。**服务端的默认，不是上限**——前端可以要更少，多则被 clamp 挡住
+const REVIEW_PAGE: i64 = 10;
 
 /// 冲突双方的三元组快照：(旧主语, 旧宾语, 新主语, 新宾语, 谓词标签)。
 type ConflictSnapshot = (String, Option<String>, String, Option<String>, String);
@@ -40,27 +41,88 @@ async fn fact_snapshot(state: &AppState, kb_id: Uuid, fact_id: Uuid) -> Option<s
     row.map(|(s, p, o, c)| json!({ "subject": s, "predicate": p, "object": o, "confidence": c }))
 }
 
+#[derive(Deserialize)]
+pub struct ReviewQuery {
+    /// 要看哪一档。缺省 duplicates
+    #[serde(default)]
+    pub queue: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+/// 审核队列：**计数与内容分开取**。
+///
+/// 从前一次把八个队列全端回来，每个固定 100 条，前端再客户端分页——于是左栏
+/// 的徽标是截断后的数字（库里 164 条低置信事实，界面写 100），而第十一页之后
+/// 的东西界面上不存在。
+///
+/// 现在：计数每次都回（八个 COUNT 一条查询，走的是与列表同一套 WHERE），
+/// 内容只回当前那一档的一页。切换分档或翻页各发一次请求，代价是多几次往返，
+/// 换来的是**数字不再骗人**，而且一个有十万条待办的库也翻得到底。
 pub async fn list(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(kb_id): Path<Uuid>,
+    Query(q): Query<ReviewQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Viewer).await?;
-    let reviews = utopia_store::resolution::list_reviews(&state.pool, kb_id).await?;
-    let facts =
-        utopia_store::graph::low_confidence_facts(&state.pool, kb_id, LOW_CONFIDENCE_BELOW, 100)
-            .await?;
-    let merges = utopia_store::resolution::list_merges(&state.pool, kb_id, 30).await?;
-    let conflicts = utopia_store::temporal::list_conflicts(&state.pool, kb_id).await?;
-    let unconfirmed = utopia_store::graph::stale_facts(&state.pool, kb_id, 100).await?;
-    // 语义层的待表态映射（0011）。从前它借「低置信事实」那一档露面——
-    // 靠 confidence 0.6 混进去,而它根本不是一条关于世界的断言。
-    // 现在自成一档,前端也据此分组显示
-    let mappings = utopia_store::mappings::proposed(&state.pool, kb_id, 100).await?;
+    let counts = utopia_store::review::counts(&state.pool, kb_id).await?;
+    let queue = q.queue.as_deref().unwrap_or("duplicates");
+    // 上限挡住「limit=1000000 把库拖垮」，同时留出足够一页的余量
+    let limit = q.limit.unwrap_or(REVIEW_PAGE).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+
+    let items = match queue {
+        "duplicates" => {
+            json!(utopia_store::resolution::list_reviews(&state.pool, kb_id, limit, offset).await?)
+        }
+        "conflicts" => {
+            json!(utopia_store::temporal::list_conflicts(&state.pool, kb_id, limit, offset).await?)
+        }
+        "unconfirmed" => {
+            json!(utopia_store::graph::stale_facts(&state.pool, kb_id, limit, offset).await?)
+        }
+        "lowconf" => json!(
+            utopia_store::graph::low_confidence_facts(
+                &state.pool,
+                kb_id,
+                utopia_store::review::LOW_CONFIDENCE_BELOW,
+                limit,
+                offset,
+            )
+            .await?
+        ),
+        "mappings" => {
+            json!(utopia_store::mappings::proposed(&state.pool, kb_id, limit, offset).await?)
+        }
+        "violations" => {
+            json!(
+                utopia_store::reasoning::open_violations(&state.pool, kb_id, limit, offset).await?
+            )
+        }
+        "defects" => {
+            json!(utopia_store::reasoning::open_defects(&state.pool, kb_id, limit, offset).await?)
+        }
+        "merges" => {
+            json!(utopia_store::resolution::list_merges(&state.pool, kb_id, limit, offset).await?)
+        }
+        // 认不出的档名当成契约错误报出来，而不是悄悄回空——悄悄回空会让前端
+        // 拼错一个字母之后看到「这一档清空了」
+        other => {
+            return Err(utopia_core::AppError::invalid(
+                "unknown_queue",
+                format!("no review queue named {other}"),
+            )
+            .into())
+        }
+    };
+
     Ok(Json(json!({
-        "reviews": reviews, "facts": facts, "merges": merges,
-        "conflicts": conflicts, "unconfirmed": unconfirmed,
-        "mappings": mappings
+        "counts": counts,
+        "queue": queue,
+        "items": items,
     })))
 }
 
@@ -429,4 +491,195 @@ pub async fn decide_mapping(
     .await;
     state.emit_review(kb_id);
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct DecideViolationReq {
+    /// fact_retracted | axiom_relaxed | accepted
+    pub resolution: String,
+}
+
+/// 人裁决一处公理违规。
+///
+/// **三个出路而不是两个。** `axiom_relaxed` 是这一档独有的：矛盾可能出在定义
+/// 而不是数据——用户导的本体把某个属性声明成反对称，而他自己的语料里那关系
+/// 其实双向。这时该改的是本体，不是二十条事实。
+///
+/// 端点只记决定，不替人执行。撤事实走 `reject_fact`，改公理走本体页——
+/// 那两个动作各有自己的权限与台账，塞进这里会变成一个什么都能干的端点。
+pub async fn decide_violation(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path((kb_id, violation_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<DecideViolationReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_kb(&state, &user, kb_id, Role::Editor).await?;
+    if !matches!(
+        req.resolution.as_str(),
+        "fact_retracted" | "axiom_relaxed" | "accepted"
+    ) {
+        return Err(utopia_core::AppError::invalid(
+            "bad_resolution",
+            "resolution 只能是 fact_retracted、axiom_relaxed 或 accepted",
+        )
+        .into());
+    }
+    utopia_store::reasoning::decide(&state.pool, kb_id, violation_id, &req.resolution, user.id)
+        .await?;
+    let _ = utopia_store::audit::record(
+        &state.pool,
+        Some(kb_id),
+        user.id,
+        "violation.decided",
+        "axiom_violation",
+        Some(violation_id),
+        json!({ "resolution": req.resolution }),
+    )
+    .await;
+    state.emit_review(kb_id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 手动跑一遍一致性检查。
+///
+/// **同步跑而不是排任务**：这是纯计算，没有模型调用也没有网络——一个几万条
+/// 事实的库跑下来是毫秒级。排进任务队列只会让人点完按钮盯着一个"排队中"，
+/// 而队列真正要解决的是"这活儿要跑几分钟"。
+///
+/// `predicates_with_axioms` 一并回给前端：**零和零的含义不同**。没有公理时
+/// 结论是"没有判据"，界面该说"先导一份带公理的本体"，而不是"未发现矛盾"。
+pub async fn run_consistency_check(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(kb_id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_kb(&state, &user, kb_id, Role::Editor).await?;
+    let report = utopia_store::reasoning::run(&state.pool, kb_id).await?;
+    // 本体自洽性一并算。两者判据同源（都是本体声明的公理），分两个按钮
+    // 只会让人点两次
+    let onto = utopia_store::reasoning::check_ontology(&state.pool, kb_id).await?;
+    let _ = utopia_store::audit::record(
+        &state.pool,
+        Some(kb_id),
+        user.id,
+        "consistency.checked",
+        "knowledge_base",
+        Some(kb_id),
+        json!({
+            "edges": report.edges,
+            "predicates_with_axioms": report.predicates_with_axioms,
+            "found": report.found,
+            "inserted": report.inserted,
+            "cleared": report.cleared,
+            "defects_found": onto.found,
+        }),
+    )
+    .await;
+    state.emit_review(kb_id);
+    Ok(Json(json!({
+        "edges": report.edges,
+        "predicates_with_axioms": report.predicates_with_axioms,
+        "found": report.found,
+        "inserted": report.inserted,
+        "cleared": report.cleared,
+        // 本体自己那一档单独回。**不加进 found**：两个数不是一类东西，
+        // 加起来之后「3 处矛盾」既可能是三条事实抵触，也可能是本体自己写反了三处
+        "classes": onto.classes,
+        "defects_found": onto.found,
+        "defects_new": onto.inserted,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct DecideDefectReq {
+    /// fixed | accepted
+    pub resolution: String,
+}
+
+/// 人对一处本体缺陷表态。
+///
+/// **两个出路而不是三个**：本体缺陷压根没看数据，所以没有「数据错了」这一条。
+pub async fn decide_defect(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path((kb_id, defect_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<DecideDefectReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_kb(&state, &user, kb_id, Role::Editor).await?;
+    if !matches!(req.resolution.as_str(), "fixed" | "accepted") {
+        return Err(utopia_core::AppError::invalid(
+            "bad_resolution",
+            "resolution 只能是 fixed 或 accepted",
+        )
+        .into());
+    }
+    utopia_store::reasoning::decide_defect(&state.pool, kb_id, defect_id, &req.resolution, user.id)
+        .await?;
+    let _ = utopia_store::audit::record(
+        &state.pool,
+        Some(kb_id),
+        user.id,
+        "defect.decided",
+        "ontology_defect",
+        Some(defect_id),
+        json!({ "resolution": req.resolution }),
+    )
+    .await;
+    state.emit_review(kb_id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 跑一遍推理（R1）。
+///
+/// **受 `materialize_inferences` 开关约束。** 默认关，因为这一步往图里加东西，
+/// 而 0001 判据 2 说「本体是引导不是执法」——声明可能是错的，不该在用户没表态时
+/// 就按它改图。开关关着时不静默跳过：回一个明确的错，界面才说得出为什么没动。
+///
+/// 同步跑，与一致性检查同一个理由：纯计算，没有模型调用也没有网络。
+pub async fn run_inference(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(kb_id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_kb(&state, &user, kb_id, Role::Editor).await?;
+    let on: bool =
+        sqlx::query_scalar("SELECT materialize_inferences FROM knowledge_bases WHERE id = $1")
+            .bind(kb_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(utopia_core::AppError::Db)?;
+    if !on {
+        return Err(utopia_core::AppError::invalid(
+            "inference_off",
+            "materialized inference is off for this knowledge base",
+        )
+        .into());
+    }
+    let report = utopia_store::reasoning::materialize(&state.pool, kb_id).await?;
+    let _ = utopia_store::audit::record(
+        &state.pool,
+        Some(kb_id),
+        user.id,
+        "inference.materialized",
+        "knowledge_base",
+        Some(kb_id),
+        json!({
+            "rules": report.rules,
+            "edges": report.edges,
+            "derived": report.derived,
+            "inserted": report.inserted,
+            "invalidated": report.invalidated,
+            "capped": report.capped,
+        }),
+    )
+    .await;
+    state.emit_graph(kb_id);
+    Ok(Json(json!({
+        "rules": report.rules,
+        "edges": report.edges,
+        "derived": report.derived,
+        "inserted": report.inserted,
+        "invalidated": report.invalidated,
+        "capped": report.capped,
+    })))
 }

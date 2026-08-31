@@ -72,6 +72,16 @@ async fn main() -> anyhow::Result<()> {
     let search = Arc::new(SearchIndex::open(&index_dir)?);
     tracing::info!("全文索引就绪: {}", index_dir.display());
 
+    // **索引落空就自己重建，不给按钮。**
+    //
+    // 索引是独立于数据库的一份文件：换机器、卷没挂上、目录损坏，任何一样都会让它
+    // 落空。而落空之后检索只会静默回零——界面上看不出任何异样，用户会以为是
+    // 「确实没有匹配」。这种失败不该靠人先意识到再去点一个按钮。
+    //
+    // 判据是「库里有分块而索引空着」，不是「数目对不对得上」：后者在正常运行中
+    // 也会短暂不等（一篇文档正在索引），拿它当判据会让每次启动都重建一遍。
+    reindex_if_empty(&pool, &search).await;
+
     // JWT 密钥：环境变量优先（轮换、多实例显式对齐走这条），否则用库里那条；
     // 库里也没有就现生成一条存进去。生成放在这里而不是 store 里，是因为
     // OsRng 已经随 argon2 在 server 的依赖里，store 不必为此多一个依赖。
@@ -152,6 +162,39 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // 定时推理调度器（0002 R1）。
+    //
+    // **必须定时，不能只靠手点**：事实是持续变的——每篇文档抽取都在加边——而
+    // 派生只在跑的那一刻算。不定时的话，下一篇文档进来之后图上的派生就是缺的，
+    // 而这种缺失界面上看不出来（不是错，是新链没推）。
+    //
+    // 与来源同步共用一个节拍：每分钟扫一遍，到期的入队。真正的推导在任务里跑，
+    // 不在这个循环里——一个大库全量重推可能要几秒，卡在调度循环里会拖住别的库
+    let infer_state = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            match utopia_store::reasoning::due_for_inference(&infer_state.pool).await {
+                Ok(due) => {
+                    for kb_id in due {
+                        if let Err(e) = utopia_store::jobs::enqueue(
+                            &infer_state.pool,
+                            "materialize_inferences",
+                            serde_json::json!({ "kb_id": kb_id }),
+                        )
+                        .await
+                        {
+                            tracing::warn!(kb_id = %kb_id, error = %e, "推理任务入队失败");
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "扫描到期推理失败"),
+            }
+        }
+    });
+
     let app = api::router(state, &cfg);
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("Utopia 服务启动于 http://{}", cfg.bind_addr);
@@ -182,6 +225,58 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 索引空着而库里有东西 → 从库里重建一遍。
+///
+/// 失败只告警不阻断启动：检索退化成「暂时搜不到」，而整个服务起不来是更坏的
+/// 结果。日志里那一行说清了发生什么，下次重启还会再试。
+async fn reindex_if_empty(pool: &sqlx::PgPool, search: &SearchIndex) {
+    if !search.is_empty() {
+        return;
+    }
+    let total = match utopia_store::documents::live_chunk_count(pool).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "数不出分块数，跳过索引重建");
+            return;
+        }
+    };
+    if total == 0 {
+        return;
+    }
+    tracing::info!(chunks = total, "全文索引是空的，从库里重建");
+    let rows = match utopia_store::documents::all_chunks_for_index(pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "读分块失败，索引未重建");
+            return;
+        }
+    };
+    // 按文档攒批再写：`reindex_document` 一次替换一篇文档的全部分块，
+    // 逐条调会把前一条刚写的删掉
+    let mut current: Option<(uuid::Uuid, uuid::Uuid)> = None;
+    let mut batch: Vec<(String, String)> = Vec::new();
+    let mut done = 0usize;
+    let flush = |key: Option<(uuid::Uuid, uuid::Uuid)>, batch: &mut Vec<(String, String)>| {
+        if let Some((kb, doc)) = key {
+            if let Err(e) = search.reindex_document(&kb.to_string(), &doc.to_string(), batch) {
+                tracing::warn!(error = %e, document = %doc, "重建索引时有一篇没写进去");
+            }
+        }
+        batch.clear();
+    };
+    for (kb_id, doc_id, chunk_id, text) in rows {
+        if current != Some((kb_id, doc_id)) {
+            flush(current, &mut batch);
+            current = Some((kb_id, doc_id));
+        }
+        batch.push((chunk_id.to_string(), text));
+        done += 1;
+    }
+    // `reindex_document` 自己 commit，所以这里不必再提交一次
+    flush(current, &mut batch);
+    tracing::info!(chunks = done, "全文索引重建完成");
+}
+///
 /// 任务分发：新任务类型在这里注册。
 ///
 /// 单拎成函数而不是内联在闭包里，是为了让失败**有一个统一的出口**——
@@ -208,6 +303,40 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
             mappings::explore_mappings(st, kb_id).await
+        }
+        // 定时重推（0002 R1）。**先记时间再推**——推导抛错时也不该让这个库
+        // 在下一分钟被重新扫起来，那会变成一个每分钟失败一次的循环
+        "materialize_inferences" => {
+            let kb_id: Uuid = job
+                .payload
+                .get("kb_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+            utopia_store::reasoning::mark_inference_ran(&st.pool, kb_id).await?;
+            let report = utopia_store::reasoning::materialize(&st.pool, kb_id).await?;
+            // **到点对比**：`materialize` 本来就在拿这一轮算出来的对上库里现有的，
+            // 所以「对比」不是新机制。这里只把那次对比的结果留下来给人看——
+            // 没有变化时不写，免得台账被每小时一条「什么都没变」淹掉
+            if report.inserted > 0 || report.invalidated > 0 {
+                let _ = utopia_store::audit::record(
+                    &st.pool,
+                    Some(kb_id),
+                    Uuid::nil(),
+                    "inference.materialized",
+                    "knowledge_base",
+                    Some(kb_id),
+                    serde_json::json!({
+                        "scheduled": true,
+                        "inserted": report.inserted,
+                        "invalidated": report.invalidated,
+                        "rules": report.rules,
+                    }),
+                )
+                .await;
+                st.emit_graph(kb_id);
+            }
+            Ok(())
         }
         "extract_document" => {
             let id = payload_document_id(&job.payload)?;

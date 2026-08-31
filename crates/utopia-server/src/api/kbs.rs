@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
@@ -38,6 +38,12 @@ pub struct UpdateKbReq {
     /// 本体语言（`en` | `zh`）：跟语料走，不跟界面走。见 docs/decisions/0004
     #[serde(default)]
     pub ontology_lang: Option<String>,
+    /// 物化推理开关（缺省关）。见 docs/decisions/0002 R1
+    #[serde(default)]
+    pub materialize_inferences: Option<bool>,
+    /// 多久重推一次（分钟）。事实持续在变，只靠手点会让派生一直是缺的
+    #[serde(default)]
+    pub inference_interval_minutes: Option<i32>,
 }
 
 /// 用户可见的 KB 列表（restricted 库仅矩阵成员与系统管理员可见）。
@@ -85,7 +91,18 @@ pub async fn create(
     )
     .await?;
     if let Some(v) = req.visibility.as_deref() {
-        utopia_store::kbs::update(&state.pool, kb.id, None, None, Some(v), None, None).await?;
+        utopia_store::kbs::update(
+            &state.pool,
+            kb.id,
+            None,
+            None,
+            Some(v),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
     }
     utopia_store::access::set_kb_member(&state.pool, kb.id, user.id, "admin", Some(user.id))
         .await?;
@@ -161,6 +178,8 @@ pub async fn update(
         req.visibility.as_deref(),
         req.auto_extend_ontology,
         req.ontology_lang.as_deref(),
+        req.materialize_inferences,
+        req.inference_interval_minutes,
     )
     .await?;
     // 审计只记不阻断
@@ -260,14 +279,66 @@ pub async fn remove_member(
 }
 
 /// 库级审计日志（Admin 起步；纯审计展示）。
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    /// 动作前缀。`entity.` 捞出 entity.retyped / entity.renamed 一族
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub actor: Option<Uuid>,
+    /// 含起点、不含终点，与半开区间的惯例一致
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+/// 日期参数：按天给（`2026-08-30`）或 RFC3339 都收。
+fn parse_day(raw: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, AppError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(Some(d.and_hms_opt(0, 0, 0).unwrap().and_utc()));
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|t| Some(t.with_timezone(&chrono::Utc)))
+        .map_err(|_| AppError::invalid("bad_date", "expected YYYY-MM-DD or RFC3339"))
+}
+
+/// 审计台账。**分页 + 筛选**——从前是固定最近 100 条，而台账是合规材料，
+/// 「只看得到最近一百条」等于查不了历史。
 pub async fn audit_log(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
+    Query(q): Query<AuditQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     kb_with_role(&state, &user, id, Role::Admin).await?;
-    let events = utopia_store::audit::list_for_kb(&state.pool, id, 100).await?;
-    Ok(Json(json!({ "events": events })))
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let action = q.action.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let (events, total) = utopia_store::audit::list_for_kb(
+        &state.pool,
+        id,
+        action,
+        q.actor,
+        parse_day(q.since.as_deref())?,
+        parse_day(q.until.as_deref())?,
+        limit,
+        offset,
+    )
+    .await?;
+    // 下拉按这个库实际发生过的动作填，而不是一份硬编码清单——
+    // 后者会列出一堆这个库从来没有过的选项
+    let actions = utopia_store::audit::actions_for_kb(&state.pool, id).await?;
+    Ok(Json(
+        json!({ "events": events, "total": total, "actions": actions }),
+    ))
 }
 /// 建库时装选中的本体包。
 ///

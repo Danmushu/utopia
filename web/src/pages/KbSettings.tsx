@@ -21,6 +21,7 @@ import {
   DangerConfirm,
   Dropdown,
   Loading,
+  Pager,
   RAIL_CLS,
   SearchSelect,
 } from "../ui";
@@ -65,6 +66,9 @@ export function KbSettings() {
   const [desc, setDesc] = useState("");
   const [visibility, setVisibility] = useState<"open" | "restricted">("open");
   const [autoExtend, setAutoExtend] = useState(true);
+  // **默认关**，与上面那个相反：推理往账本里写事实，而声明可能是错的
+  const [materialize, setMaterialize] = useState(false);
+  const [inferMins, setInferMins] = useState(60);
   const [ontoLang, setOntoLang] = useState<"en" | "zh">("en");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +79,8 @@ export function KbSettings() {
       setDesc(kb.data.description ?? "");
       setVisibility(kb.data.visibility);
       setAutoExtend(kb.data.auto_extend_ontology);
+      setMaterialize(kb.data.materialize_inferences);
+      setInferMins(kb.data.inference_interval_minutes);
       setOntoLang(kb.data.ontology_lang);
     }
   }, [kb.data]);
@@ -91,6 +97,8 @@ export function KbSettings() {
         description: desc.trim() || null,
         visibility,
         auto_extend_ontology: autoExtend,
+        materialize_inferences: materialize,
+        inference_interval_minutes: inferMins,
         ontology_lang: ontoLang,
       }),
     onSuccess: () => {
@@ -247,6 +255,51 @@ export function KbSettings() {
                   </span>
                 </span>
               </label>
+              {/* 物化推理：**默认关**，与上面那个相反。自动扩本体动的是词表，
+                  这个动的是账本——它按公理往图里写事实，而声明可能是错的 */}
+              <label className="flex items-start gap-2.5 pt-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 accent-[var(--u-accent)]"
+                  checked={materialize}
+                  onChange={(e) => setMaterialize(e.target.checked)}
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm text-neutral-200">
+                    {S.kbset.materialize}
+                  </span>
+                  <span className="block text-xs leading-relaxed text-neutral-500">
+                    {S.kbset.materializeNote}
+                  </span>
+                </span>
+              </label>
+              {/* 重推间隔。**只在开着的时候露出来**——关着时它不影响任何事，
+                  摆在那里只会让人以为设了就会推 */}
+              {materialize && (
+                <div className="pl-6 flex items-center gap-2">
+                  <label className="text-xs text-neutral-500">
+                    {S.kbset.inferEvery}
+                  </label>
+                  <input
+                    type="number"
+                    min={5}
+                    max={10080}
+                    className="input-dark w-24 px-2 py-1 text-xs u-num"
+                    value={inferMins}
+                    onChange={(e) => setInferMins(Number(e.target.value))}
+                  />
+                  <span className="text-xs text-neutral-500">
+                    {S.kbset.minutes}
+                  </span>
+                  {kb.data.last_inference_at && (
+                    <span className="text-[11px] text-neutral-600">
+                      {S.kbset.lastInference(
+                        new Date(kb.data.last_inference_at).toLocaleString(),
+                      )}
+                    </span>
+                  )}
+                </div>
+              )}
               {/* 语料语言。**不是界面语言**——类描述逐字进抽取提示词，
                   读者是正在读这些文档的模型，所以它跟文档走不跟读者走 */}
               <div className="pt-1">
@@ -347,16 +400,87 @@ function auditDetailName(e: AuditEvent): string {
   return typeof hit === "string" ? hit : "";
 }
 
+const AUDIT_PAGE = 50;
+
 function KbActivity({ kbId }: { kbId: string }) {
+  // 筛选按真实查法来：查一类动作、查一个人、查一段时间。
+  // 动作前缀匹配——`entity.` 就能把 retyped / renamed 一族一起捞出来
+  const [action, setAction] = useState("");
+  const [since, setSince] = useState("");
+  const [until, setUntil] = useState("");
+  const [page, setPage] = useState(0);
   const audit = useQuery({
-    queryKey: ["kbAudit", kbId],
-    queryFn: () => api.kbAudit(kbId),
+    queryKey: ["kbAudit", kbId, action, since, until, page],
+    queryFn: () =>
+      api.kbAudit(kbId, {
+        action: action || undefined,
+        since: since || undefined,
+        until: until || undefined,
+        limit: AUDIT_PAGE,
+        offset: page * AUDIT_PAGE,
+      }),
+    placeholderData: (prev) => prev,
   });
   const events = audit.data?.events ?? [];
+  const total = audit.data?.total ?? 0;
+  // 下拉按这个库实际发生过的动作填，不是硬编码清单
+  const actions = audit.data?.actions ?? [];
+  const filtered = !!(action || since || until);
+
+  const reset = (fn: () => void) => {
+    fn();
+    setPage(0);
+  };
 
   return (
     <div className="glass rounded-xl p-4">
       <p className="text-xs text-neutral-500 mb-3">{S.kbset.activityHint}</p>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <select
+          className="input-dark px-2 py-1 text-xs"
+          value={action}
+          onChange={(e) => reset(() => setAction(e.target.value))}
+        >
+          <option value="">{S.kbset.auditAllActions}</option>
+          {actions.map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+        <input
+          type="date"
+          className="input-dark px-2 py-1 text-xs u-num"
+          value={since}
+          title={S.kbset.auditSince}
+          onChange={(e) => reset(() => setSince(e.target.value))}
+        />
+        <span className="text-xs text-neutral-600">→</span>
+        <input
+          type="date"
+          className="input-dark px-2 py-1 text-xs u-num"
+          value={until}
+          title={S.kbset.auditUntil}
+          onChange={(e) => reset(() => setUntil(e.target.value))}
+        />
+        {filtered && (
+          <button
+            className="u-btn u-btn-ghost px-2 py-1 text-xs"
+            onClick={() =>
+              reset(() => {
+                setAction("");
+                setSince("");
+                setUntil("");
+              })
+            }
+          >
+            {S.kbset.auditClear}
+          </button>
+        )}
+        <span className="ml-auto u-num text-[11px] text-neutral-500">
+          {S.kbset.auditTotal(total)}
+        </span>
+      </div>
       {audit.isPending ? (
         <p className="text-xs text-neutral-600">{S.nav.loading}</p>
       ) : events.length === 0 ? (
@@ -389,6 +513,12 @@ function KbActivity({ kbId }: { kbId: string }) {
           ))}
         </div>
       )}
+      <Pager
+        total={total}
+        pageSize={AUDIT_PAGE}
+        page={page}
+        onPage={setPage}
+      />
     </div>
   );
 }

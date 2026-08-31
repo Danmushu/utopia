@@ -74,6 +74,8 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
             axum::routing::put(members_routes::set_role).delete(members_routes::remove),
         )
         .route("/users", get(members_routes::org_users))
+        // 已停用的账号：没有这一条，恢复就够不着（那个人从所有列表里消失）
+        .route("/users/deactivated", get(members_routes::deactivated_users))
         .route(
             "/kbs/{id}",
             patch(kbs::update).get(kbs::get_one).delete(kbs::delete),
@@ -130,6 +132,11 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
             get(documents_routes::list)
                 .post(documents_routes::upload)
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        // 一键重试：抽取失败往往是成批的（模型端点断了一阵，那段时间进来的全挂）
+        .route(
+            "/kbs/{id}/documents/retry-failed",
+            post(documents_routes::retry_failed),
         )
         .route(
             "/kbs/{id}/extraction-drops",
@@ -221,7 +228,9 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         .route("/kbs/{id}/conversations", get(chat::list_conversations))
         .route(
             "/kbs/{id}/conversations/{conversation_id}",
-            get(chat::conversation_detail).delete(chat::delete_conversation),
+            get(chat::conversation_detail)
+                .patch(chat::rename_conversation)
+                .delete(chat::delete_conversation),
         )
         .route(
             "/documents/{id}",
@@ -294,6 +303,25 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         .route(
             "/kbs/{id}/review/mappings/{mapping_id}",
             post(review_routes::decide_mapping),
+        )
+        // 一致性检查（0002 R0）：跑一遍，与裁决一处违规。
+        // 检查本身是纯计算,同步跑
+        .route(
+            "/kbs/{id}/consistency/check",
+            post(review_routes::run_consistency_check),
+        )
+        .route(
+            "/kbs/{id}/review/violations/{violation_id}",
+            post(review_routes::decide_violation),
+        )
+        .route(
+            "/kbs/{id}/review/defects/{defect_id}",
+            post(review_routes::decide_defect),
+        )
+        // R1 物化推导。受 KB 上的 materialize_inferences 开关约束
+        .route(
+            "/kbs/{id}/inference/run",
+            post(review_routes::run_inference),
         )
         .route(
             "/kbs/{id}/facts/{fact_id}/confirm",

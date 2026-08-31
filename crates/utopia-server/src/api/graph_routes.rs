@@ -32,6 +32,10 @@ fn parse_at(raw: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, 
         .map_err(|_| AppError::Validation("Invalid `at` (expected YYYY-MM-DD or RFC3339)".into()))
 }
 
+/// 总览一次画多少个节点。**上限本身是合理的**——画一万个点没人看得懂；
+/// 骗人的是把它当成规模显示，所以接口同时回总数
+const GRAPH_NODE_CAP: i64 = 150;
+
 #[derive(Deserialize)]
 pub struct OverviewQuery {
     #[serde(default)]
@@ -46,8 +50,14 @@ pub async fn overview(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Viewer).await?;
     let at = parse_at(q.at.as_deref())?;
-    let (nodes, edges) = utopia_store::graph::overview(&state.pool, kb_id, 150, at).await?;
-    Ok(Json(json!({ "nodes": nodes, "edges": edges })))
+    // 画多少个是渲染的事，库里有多少是知识库的事——两个数都回，界面才说得出
+    // 「画了 150 个，共 325 个」而不是把上限说成规模
+    let (nodes, edges, total_nodes, total_edges) =
+        utopia_store::graph::overview(&state.pool, kb_id, GRAPH_NODE_CAP, at).await?;
+    Ok(Json(json!({
+        "nodes": nodes, "edges": edges,
+        "total_nodes": total_nodes, "total_edges": total_edges,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -76,6 +86,10 @@ pub async fn neighborhood(
 #[derive(Deserialize)]
 pub struct EntitySearchQuery {
     pub q: String,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
 }
 
 pub async fn search_entities(
@@ -86,10 +100,19 @@ pub async fn search_entities(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Viewer).await?;
     if query.q.trim().is_empty() {
-        return Ok(Json(json!({ "entities": [] })));
+        return Ok(Json(json!({ "entities": [], "total": 0 })));
     }
-    let entities = utopia_store::graph::search_entities(&state.pool, kb_id, &query.q, 10).await?;
-    Ok(Json(json!({ "entities": entities })))
+    // 一并回总数：「宁分勿合」本来就会造出一堆同名，固定十条时想找的那个
+    // 可能根本不在这十条里，而界面上看不出来
+    let (entities, total) = utopia_store::graph::search_entities(
+        &state.pool,
+        kb_id,
+        &query.q,
+        query.limit.unwrap_or(10).clamp(1, 100),
+        query.offset.unwrap_or(0).max(0),
+    )
+    .await?;
+    Ok(Json(json!({ "entities": entities, "total": total })))
 }
 
 pub async fn entity_detail(
@@ -99,7 +122,21 @@ pub async fn entity_detail(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Viewer).await?;
     let (entity, facts) = utopia_store::graph::entity_detail(&state.pool, kb_id, entity_id).await?;
-    Ok(Json(json!({ "entity": entity, "facts": facts })))
+    // 推出来的那些**单独回一个键**，不掺进 `facts`。前端据此给它们自己的一档：
+    // 一条派生边跟一条断言边混在同一个列表里，用户看不出「这条是文档里写的」
+    // 和「这条是引擎推的」的区别，而那正是推理会污染知识的样子
+    let derived =
+        utopia_store::reasoning::derived_for_entity(&state.pool, kb_id, entity_id).await?;
+    // 同名的那些**打开面板时就给**，不是等改名之后才回。
+    //
+    // 从前它只随 `update_entity` 的响应回来，于是「把同名的合并进来」这个动作
+    // 只有先改一次名才够得着——而两个张伟并存是「宁分勿合」的正当产物，不是
+    // 改名改出来的。合并入口该长在能看见同名的地方。
+    let same_name = utopia_store::graph::same_name_peers(&state.pool, kb_id, entity_id).await?;
+    Ok(Json(json!({
+        "entity": entity, "facts": facts,
+        "derived": derived, "same_name": same_name,
+    })))
 }
 
 #[derive(Deserialize)]

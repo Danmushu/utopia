@@ -85,6 +85,13 @@ export interface Kb {
   /** 抽取遇到本体外的说法时，是否允许系统自动补进本体并改写等它的事实。
       关掉不影响"留意"：未匹配统计照常累积可见，只是变成你点一下的提案 */
   auto_extend_ontology: boolean;
+  /** 把推出来的事实写进账本（R1）。**缺省关**——推理往图里加东西，
+   *  而声明可能是错的，不该在用户没表态时就按它改图 */
+  materialize_inferences: boolean;
+  /** 多久重推一次（分钟）。事实持续在变，只靠手点会让派生一直是缺的 */
+  inference_interval_minutes: number;
+  /** 上次推完的时间 */
+  last_inference_at: string | null;
   /** 内置本体按哪种语言播种、新描述写哪种语言。**跟语料走，不跟界面走**
       （界面语言在客户端，见 docs/decisions/0004） */
   ontology_lang: "en" | "zh";
@@ -134,6 +141,8 @@ export interface Doc {
   /** 图谱抽取管道的失败原因（与 error 分列：两条管道各存各的） */
   graph_error: string | null;
   chunk_count: number;
+  /** 文档标签。**今天没有任何界面用它**——故意留着，理由写在
+   *  `migrations/0002_ingest.sql` 的 `tags` 列上 */
   tags: string[];
   missing_since: string | null;
   created_at: string;
@@ -270,6 +279,100 @@ export interface ChunkFact {
   confidence: number;
 }
 
+/** 一条推出来的事实，连同它的证明（实体面板的「推出来的」那一档）。
+ *
+ * `premises` 是这一档存在的理由：不给出前提的话，一条派生边跟一条普通的边
+ * 在界面上看不出区别，而那正是「推理污染知识」的样子。 */
+export interface DerivedFact {
+  id: string;
+  subject_id: string;
+  subject: string;
+  object_id: string;
+  object: string;
+  predicate: string;
+  /** 靠哪条规则推的 */
+  rule: "transitive" | "symmetric";
+  valid_from: string | null;
+  valid_to: string | null;
+  confidence: number;
+  derived_at: string;
+  /** 直接前提，按推导顺序 */
+  premises: string[];
+}
+
+/** 审核页的分档。**与服务端的 queue 参数是同一组字面量**——拼错会拿到
+ *  一个明确的 unknown_queue 错误，而不是悄悄的空列表。 */
+export type ReviewQueue =
+  | "duplicates"
+  | "conflicts"
+  | "unconfirmed"
+  | "lowconf"
+  | "mappings"
+  | "violations"
+  | "defects"
+  | "merges";
+
+/** 各档的真实条数。左栏的徽标读它，不读列表长度 */
+export interface ReviewCounts {
+  duplicates: number;
+  conflicts: number;
+  unconfirmed: number;
+  lowconf: number;
+  mappings: number;
+  violations: number;
+  defects: number;
+  merges: number;
+}
+
+/** 类型消解的一条建议：一个待精化的实体、送去检索的画像、以及候选类。
+ *
+ * `profile` 回给调用方是有意的——检索找不着的时候，第一个要看的就是
+ * 「我们拿什么去找的」，而不是猜是画像不对还是类的描述不对。 */
+export interface TypeSuggestion {
+  entity_id: string;
+  name: string;
+  /** 现在挂着的类，可能没有（0009） */
+  coarse: string | null;
+  coarse_description: string | null;
+  proposed_type: string | null;
+  specific_type: string | null;
+  fact_count: number;
+  profile: string;
+  candidates: {
+    id: string;
+    key: string;
+    label: string;
+    description: string;
+    distance: number;
+  }[];
+}
+
+/** 跑完一轮的结果。**三档分开报**：自动改了的、留给人的、裁决说「都不是」的。
+ *  最后那一档带着理由——这一步押在「选择都不是是个体面答案」上，
+ *  不记理由，最大的那一档就是不透明的。 */
+export interface ResolutionOutcome {
+  batch: string | null;
+  retyped: number;
+  for_review: {
+    entity_id: string;
+    name: string;
+    coarse: string | null;
+    from_type_id: string | null;
+    to_type_id: string;
+    choice: string;
+    confidence: number;
+    reason: string | null;
+    /** 选中的类不在粗类的子树里——换的是分类轴，不是往下走一格 */
+    crosses_axis: boolean;
+  }[];
+  left_alone: {
+    name: string;
+    coarse: string | null;
+    specific_type: string | null;
+    reason: string | null;
+    top_candidate: string | null;
+  }[];
+}
 export interface ReviewSide {
   id: string;
   name: string;
@@ -310,6 +413,36 @@ export interface ConceptMapping {
   /** 派生指标：算出来的，不是表里的列 */
   derived: boolean;
   status: "proposed" | "confirmed" | "rejected";
+}
+/** 一处公理违规（0002 R0）。判据来自本体自己声明的公理，没声明就不报 */
+export interface AxiomViolation {
+  id: string;
+  kind: "self_loop" | "asymmetry" | "cycle" | "functional";
+  /** 判据来自哪条关系。判「公理写错了」时从这里进本体去改 */
+  predicate: string | null;
+  left_fact: string;
+  left_text: string;
+  /** 自反那一类与 left 相同——一条事实跟自己矛盾 */
+  right_fact: string;
+  right_text: string;
+  /** 环的长度；其余三类为 0 */
+  path_len: number;
+  detected_at: string;
+}
+/** 本体自己的一处自相矛盾。**与 AxiomViolation 不是一回事**：那个说
+ *  「事实与定义抵触」，这个说「定义自己站不住」，后者更根本 */
+export interface OntologyDefect {
+  id: string;
+  kind:
+    | "symmetric_and_asymmetric"
+    | "transitive_and_functional"
+    | "subclass_cycle"
+    | "disjoint_with_ancestor"
+    | "inherits_disjoint";
+  subject_label: string | null;
+  other_label: string | null;
+  path_labels: string[];
+  detected_at: string;
 }
 export interface FactReviewItem {
   id: string;
@@ -371,6 +504,9 @@ export interface GraphEdge {
   label: string | null;
   /** true = 这条边的名字来自原文，不是本体认下的关系 */
   inferred: boolean;
+  /** true = 这条边是**推出来的**，不是任何人断言的（R1）。
+   *  与 `inferred` 不是一回事：那个说「名字来自原文」，这个说「不是谁说的」 */
+  derived: boolean;
   valid_from: string | null;
   valid_to: string | null;
   confidence: number;
@@ -471,6 +607,8 @@ export interface EntityTypeView {
   builtin: boolean;
   /** 全部父类（subClassOf 可以有多个） */
   parents: string[];
+  /** 与它互斥的类：**声明「不可能同时是」** */
+  disjoint: string[];
   /** 左栏画树时挂在哪一支下。不参与语义，只管展示 */
   primary_parent: string | null;
   description: string;
@@ -484,6 +622,11 @@ export interface RelationTypeView {
   temporal: string;
   functional: boolean;
   inverse_functional: boolean;
+  /** 其余四条 OWL 公理。**推理机的判据全在这里** */
+  is_transitive: boolean;
+  is_symmetric: boolean;
+  is_asymmetric: boolean;
+  is_irreflexive: boolean;
   builtin: boolean;
   description: string;
   /** relation（宾语是实体）| attribute（宾语是字面值） */
@@ -715,8 +858,34 @@ export const api = {
 
   kbs: (workspaceId: string) =>
     request<Kb[]>(`/api/v1/workspaces/${workspaceId}/kbs`),
-  kbAudit: (kbId: string) =>
-    request<{ events: AuditEvent[] }>(`/api/v1/kbs/${kbId}/audit`),
+  /** 审计台账。**分页 + 筛选**——台账是合规材料，只看最近 100 条等于查不了历史。
+   *  `action` 是前缀：`entity.` 捞出 entity.retyped / entity.renamed 一族。 */
+  kbAudit: (
+    kbId: string,
+    opts: {
+      action?: string;
+      actor?: string;
+      since?: string;
+      until?: string;
+      limit: number;
+      offset: number;
+    },
+  ) => {
+    const p = new URLSearchParams({
+      limit: String(opts.limit),
+      offset: String(opts.offset),
+    });
+    if (opts.action) p.set("action", opts.action);
+    if (opts.actor) p.set("actor", opts.actor);
+    if (opts.since) p.set("since", opts.since);
+    if (opts.until) p.set("until", opts.until);
+    return request<{
+      events: AuditEvent[];
+      total: number;
+      /** 这个库实际发生过的动作，筛选下拉按它填 */
+      actions: string[];
+    }>(`/api/v1/kbs/${kbId}/audit?${p}`);
+  },
   myKbs: (workspaceId: string) =>
     request<{ kbs: MyKb[] }>(`/api/v1/workspaces/${workspaceId}/my-kbs`),
   createKb: (
@@ -810,6 +979,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** 已停用的账号。**没有它恢复就够不着**——那个人从所有列表里消失，
+   *  而恢复接口要的正是他的 id */
+  deactivatedUsers: () =>
+    request<OrgUser[]>("/api/v1/users/deactivated"),
+  /** 恢复一个停用的账号 */
+  adminReactivateUser: (userId: string) =>
+    request<{ ok: boolean }>(`/api/v1/admin/users/${userId}`, {
+      method: "POST",
+    }),
   /** 停用一个账号（软删除）。归因照旧查得到——审计、合并日志、改类账本都靠它 */
   adminDeactivateUser: (userId: string) =>
     request<{ ok: boolean }>(`/api/v1/admin/users/${userId}`, {
@@ -859,7 +1037,41 @@ export const api = {
       { method: "POST" },
     ),
 
-  documents: (kbId: string) => request<Doc[]>(`/api/v1/kbs/${kbId}/documents`),
+  /** 文库一页。**服务端筛选与分页**——从前一次取回整库、前端切片，
+   *  而客户端筛选只筛得到已经拿下来的那些 */
+  documents: (
+    kbId: string,
+    opts: {
+      source?: string;
+      q?: string;
+      graph?: string;
+      limit: number;
+      offset: number;
+    },
+  ) => {
+    const p = new URLSearchParams({
+      limit: String(opts.limit),
+      offset: String(opts.offset),
+    });
+    if (opts.source) p.set("source", opts.source);
+    if (opts.q) p.set("q", opts.q);
+    if (opts.graph) p.set("graph", opts.graph);
+    return request<{
+      docs: Doc[];
+      total: number;
+      /** 下面三个**只按来源作用域算**，不受名字/状态筛选影响——
+       *  它们是批量按钮的作用范围 */
+      ready: number;
+      extracting: number;
+      failed: number;
+    }>(`/api/v1/kbs/${kbId}/documents?${p}`);
+  },
+  /** 一键重试这个作用域里全部抽取失败的文档 */
+  retryFailedDocs: (kbId: string, source?: string) =>
+    request<{ queued: number; found: number }>(
+      `/api/v1/kbs/${kbId}/documents/retry-failed${source ? `?source=${source}` : ""}`,
+      { method: "POST" },
+    ),
   /** 整库一次取回：行数按 (文档 × 原因 × 对象) 聚合后很小，避免逐行发请求 */
   extractionDrops: (kbId: string) =>
     request<{ drops: ExtractionDrop[] }>(
@@ -891,21 +1103,40 @@ export const api = {
       body: JSON.stringify(body),
     }),
   graphOverview: (kbId: string) =>
-    request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
-      `/api/v1/kbs/${kbId}/graph/overview`,
-    ),
+    request<{
+      nodes: GraphNode[];
+      edges: GraphEdge[];
+      /** 库里一共有多少。**与 nodes.length 不是一回事**——画布只画度数最高的
+       *  那一批，把上限当成规模显示是这个接口从前最误导人的地方 */
+      total_nodes?: number;
+      total_edges?: number;
+    }>(`/api/v1/kbs/${kbId}/graph/overview`),
+  /** 邻域视图**没有总数**：它本来就只是一小片，说「共 325 个」没有意义。
+   *  两个字段声明成可选，好让调用方与总览共用一个类型 */
   graphNeighborhood: (kbId: string, entityId: string) =>
-    request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
-      `/api/v1/kbs/${kbId}/graph/neighborhood?entity=${entityId}&hops=2`,
-    ),
-  searchEntities: (kbId: string, q: string) =>
-    request<{ entities: GraphNode[] }>(
-      `/api/v1/kbs/${kbId}/entities?q=${encodeURIComponent(q)}`,
+    request<{
+      nodes: GraphNode[];
+      edges: GraphEdge[];
+      total_nodes?: number;
+      total_edges?: number;
+    }>(`/api/v1/kbs/${kbId}/graph/neighborhood?entity=${entityId}&hops=2`),
+  /** 按名字找实体。**一并回总数**——「宁分勿合」会造出一堆同名，
+   *  固定十条时想找的那个可能根本不在这十条里 */
+  searchEntities: (kbId: string, q: string, limit = 10) =>
+    request<{ entities: GraphNode[]; total: number }>(
+      `/api/v1/kbs/${kbId}/entities?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
   entityDetail: (kbId: string, entityId: string) =>
-    request<{ entity: GraphNode; facts: EntityFact[] }>(
-      `/api/v1/kbs/${kbId}/entities/${entityId}`,
-    ),
+    request<{
+      entity: GraphNode;
+      facts: EntityFact[];
+      /** 推出来的那些**单独一个键**，不掺进 facts：混在同一个列表里，
+       *  用户看不出「文档里写的」和「引擎推的」的区别 */
+      derived: DerivedFact[];
+      /** 同名的其他实体。**打开面板就给**——合并入口要长在能看见同名的地方，
+       *  而不是藏在「改一次名」之后 */
+      same_name: GraphNode[];
+    }>(`/api/v1/kbs/${kbId}/entities/${entityId}`),
   /** 认知变更历史（记录时间轴）：服务端分页 */
   /** 人工修正实体的类型或名字。同名不拦——返回的 same_name 供界面提示是否合并。 */
   updateEntity: (
@@ -1169,15 +1400,22 @@ export const api = {
   documentExtractions: (docId: string) =>
     request<{ facts: ChunkFact[] }>(`/api/v1/documents/${docId}/extractions`),
 
-  review: (kbId: string) =>
+  /** 审核队列的各档**真实条数**。与列表分开取——列表有一页的上限，数数没有。
+   *  从前徽标读的是数组长度，而接口固定只回 100 条，于是 164 条写成 100。 */
+  review: (
+    kbId: string,
+    queue: ReviewQueue,
+    limit: number,
+    offset: number,
+  ) =>
     request<{
-      reviews: ReviewItem[];
-      facts: FactReviewItem[];
-      merges: MergeLog[];
-      conflicts: ConflictItem[];
-      unconfirmed: FactReviewItem[];
-      mappings: ConceptMapping[];
-    }>(`/api/v1/kbs/${kbId}/review`),
+      counts: ReviewCounts;
+      queue: ReviewQueue;
+      /** 只有当前这一档的一页。类型按档不同，调用处按 queue 收窄 */
+      items: unknown[];
+    }>(
+      `/api/v1/kbs/${kbId}/review?queue=${queue}&limit=${limit}&offset=${offset}`,
+    ),
   closeFact: (kbId: string, factId: string, validTo: string) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/facts/${factId}/close`, {
       method: "POST",
@@ -1203,6 +1441,88 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ status }),
     }),
+  /** 跑一遍一致性检查。同步返回——纯计算，没有模型调用也没有网络 */
+  runConsistencyCheck: (kbId: string) =>
+    request<{
+      edges: number;
+      /** **零和零不一样**：没有公理时结论是「没有判据」，不是「未发现矛盾」 */
+      predicates_with_axioms: number;
+      found: number;
+      inserted: number;
+      cleared: number;
+      classes: number;
+      /** 本体自己的矛盾**单独回**，不加进 found：两个数不是一类东西 */
+      defects_found: number;
+      defects_new: number;
+    }>(`/api/v1/kbs/${kbId}/consistency/check`, { method: "POST" }),
+  /** 对一处本体缺陷表态。**两个出路**——它压根没看数据，没有「数据错了」这条 */
+  decideDefect: (
+    kbId: string,
+    defectId: string,
+    resolution: "fixed" | "accepted",
+  ) =>
+    request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/review/defects/${defectId}`, {
+      method: "POST",
+      body: JSON.stringify({ resolution }),
+    }),
+  /** 跑一遍推理（R1）。开关关着时后端回 inference_off */
+  /** 类型消解：**只算不写**。回执里带着送去检索的画像——检索找不着时，
+   *  第一个要看的就是「我们拿什么去找的」 */
+  /** 手动合并：把 source 并进 target。**方向要紧**——source 消失，
+   *  它的事实搬到 target 上；合并可整体回滚（entity_merges 记着快照） */
+  mergeEntities: (kbId: string, source: string, target: string) =>
+    request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/entities/merge`, {
+      method: "POST",
+      body: JSON.stringify({ source, target }),
+    }),
+  typeResolutionPreview: (kbId: string) =>
+    request<{ items: TypeSuggestion[] }>(
+      `/api/v1/kbs/${kbId}/ontology/type-resolution/preview`,
+      { method: "POST" },
+    ),
+  /** 跑一遍并落库。三档分开回：自动改的、留给人的、说「都不是」的 */
+  typeResolutionApply: (kbId: string) =>
+    request<ResolutionOutcome>(`/api/v1/kbs/${kbId}/ontology/type-resolution`, {
+      method: "POST",
+    }),
+  /** 认可一个「粗类 → 细类」的配对，并把带上的实体改过去。
+   *  **认可的是类对，改的是实体**——认可一次，之后同一对不再进人工 */
+  approveRefinement: (
+    kbId: string,
+    body: { from_type_id: string; to_type_id: string; entity_ids: string[] },
+  ) =>
+    request<{ retyped: number }>(
+      `/api/v1/kbs/${kbId}/ontology/type-resolution/approve`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  /** 撤销一整批：把那批实体放回原来的类 */
+  typeResolutionUndo: (kbId: string, batchId: string) =>
+    request<{ reverted: number }>(
+      `/api/v1/kbs/${kbId}/ontology/type-resolution/${batchId}`,
+      { method: "DELETE" },
+    ),
+  runInference: (kbId: string) =>
+    request<{
+      /** 编译出来的规则条数。为零时是「没有规则」而不是「推不出东西」 */
+      rules: number;
+      edges: number;
+      derived: number;
+      inserted: number;
+      /** 前提没了、跟着作废的 */
+      invalidated: number;
+      /** 撞上单谓词上限、没推完的谓词个数 */
+      capped: number;
+    }>(`/api/v1/kbs/${kbId}/inference/run`, { method: "POST" }),
+  /** 对一处公理违规表态。三个出路——第三个是这一档独有的：可能是定义错了 */
+  decideViolation: (
+    kbId: string,
+    violationId: string,
+    resolution: "fact_retracted" | "axiom_relaxed" | "accepted",
+  ) =>
+    request<{ ok: boolean }>(
+      `/api/v1/kbs/${kbId}/review/violations/${violationId}`,
+      { method: "POST", body: JSON.stringify({ resolution }) },
+    ),
   confirmFact: (kbId: string, factId: string) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/facts/${factId}/confirm`, {
       method: "POST",
@@ -1248,10 +1568,25 @@ export const api = {
 
 /** RAG 对话：SSE 流式。返回中止函数。 */
 export const conversationsApi = {
-  list: (kbId: string) =>
-    request<{ conversations: ConversationRow[] }>(
-      `/api/v1/kbs/${kbId}/conversations`,
-    ),
+  /** **可搜可翻页**：标题会重（同一个问题问两次就重了），而固定一百条之后的
+   *  会话界面上根本不存在。搜的是标题与消息正文两处——人记得住的往往是
+   *  问过的那句话，不是标题 */
+  list: (kbId: string, q = "", limit = 30, offset = 0) => {
+    const p = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    });
+    if (q.trim()) p.set("q", q.trim());
+    return request<{ conversations: ConversationRow[]; total: number }>(
+      `/api/v1/kbs/${kbId}/conversations?${p}`,
+    );
+  },
+  /** 改标题。标题本来是从第一句话自动取的，而一段对话跑偏是常态 */
+  rename: (kbId: string, id: string, title: string) =>
+    request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/conversations/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
   detail: (kbId: string, id: string) =>
     request<{ messages: ConversationMessage[] }>(
       `/api/v1/kbs/${kbId}/conversations/${id}`,

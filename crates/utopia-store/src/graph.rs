@@ -384,12 +384,18 @@ const NODE_SQL: &str = "SELECT e.id, e.canonical_name AS name, t.key AS type_key
 /// 全图概览：按度数取 top N 实体及其间的边。
 /// `at`：服务端 as-of——只返回 T 时刻有效的边（起点不晚于 T 或未知，终点晚于 T 或开放）。
 /// 前端时间滑杆走本地过滤不传此参数；这是给 API/MCP 消费者的时间旅行入口。
+/// 图谱总览：度数最高的 `limit` 个节点，以及它们之间的边。
+///
+/// **一并回总数。** 画多少个是渲染的事，库里有多少是知识库的事，两者从前
+/// 在界面上被同一个数字表示——一个上万实体的库，右上角永远写着 150，而那
+/// 是上限不是规模。渲染上限本身是合理的（画一万个点没人看得懂），骗人的是
+/// 把它说成总数。
 pub async fn overview(
     pool: &PgPool,
     kb_id: Uuid,
     limit: i64,
     at: Option<chrono::DateTime<chrono::Utc>>,
-) -> AppResult<(Vec<GraphNode>, Vec<GraphEdge>)> {
+) -> AppResult<(Vec<GraphNode>, Vec<GraphEdge>, i64, i64)> {
     let nodes: Vec<GraphNode> = sqlx::query_as(&format!(
         "{NODE_SQL} WHERE e.kb_id = $1 AND e.merged_into IS NULL ORDER BY degree DESC, e.created_at LIMIT $2"
     ))
@@ -400,7 +406,26 @@ pub async fn overview(
 
     let ids: Vec<Uuid> = nodes.iter().map(|n| n.id).collect();
     let edges = edges_among(pool, kb_id, &ids, at).await?;
-    Ok((nodes, edges))
+
+    // 总数按与画布同一套口径数：合并掉的实体不算，作废的事实不算，
+    // 属性事实（宾语是字面值）画不出边所以也不算。口径不同的话，
+    // 「150 / 325」里那个 325 会跟用户在别处看到的数对不上
+    let total_nodes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM entities WHERE kb_id = $1 AND merged_into IS NULL",
+    )
+    .bind(kb_id)
+    .fetch_one(pool)
+    .await?;
+    let total_edges: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM facts
+                  WHERE kb_id = $1 AND invalidated_at IS NULL AND object_id IS NOT NULL)
+              + (SELECT count(*) FROM derived_facts
+                  WHERE kb_id = $1 AND invalidated_at IS NULL)",
+    )
+    .bind(kb_id)
+    .fetch_one(pool)
+    .await?;
+    Ok((nodes, edges, total_nodes, total_edges))
 }
 
 async fn edges_among(
@@ -412,18 +437,35 @@ async fn edges_among(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
+    // **派生边显式 UNION 进来。** 它们住在 `derived_facts`，不在 `facts` 里——
+    // 所以每一个想看到推理结果的读路径都得像这里一样写出来。忘了写的后果是
+    // 看不见派生，而不是把它们当成谁的断言（那正是分表买到的东西）。
+    //
+    // 图要它们，因为「这条边是推出来的」正是用户该看见的信息之一；`derived`
+    // 那一位让界面画得出区别，也让人整体过滤掉。
     let edges: Vec<GraphEdge> = sqlx::query_as(
         "SELECT f.id, f.subject_id AS source, f.object_id AS target,
                 COALESCE(r.key, fact_surface_predicate(f.id)) AS predicate,
                 COALESCE(r.label, fact_surface_predicate(f.id)) AS label,
-                r.id IS NULL AS inferred,
+                r.id IS NULL AS inferred, FALSE AS derived,
                 f.valid_from, f.valid_to, f.confidence
          FROM facts f LEFT JOIN relation_types r ON r.id = f.predicate_id
          WHERE f.kb_id = $1 AND f.invalidated_at IS NULL AND f.object_id IS NOT NULL
            AND f.subject_id = ANY($2) AND f.object_id = ANY($2)
            AND ($3::timestamptz IS NULL
                 OR ((f.valid_from IS NULL OR f.valid_from <= $3)
-                    AND (f.valid_to IS NULL OR f.valid_to > $3)))",
+                    AND (f.valid_to IS NULL OR f.valid_to > $3)))
+         UNION ALL
+         SELECT d.id, d.subject_id AS source, d.object_id AS target,
+                r.key AS predicate, r.label AS label,
+                FALSE AS inferred, TRUE AS derived,
+                d.valid_from, d.valid_to, d.confidence
+         FROM derived_facts d JOIN relation_types r ON r.id = d.predicate_id
+         WHERE d.kb_id = $1 AND d.invalidated_at IS NULL
+           AND d.subject_id = ANY($2) AND d.object_id = ANY($2)
+           AND ($3::timestamptz IS NULL
+                OR ((d.valid_from IS NULL OR d.valid_from <= $3)
+                    AND (d.valid_to IS NULL OR d.valid_to > $3)))",
     )
     .bind(kb_id)
     .bind(ids)
@@ -484,23 +526,36 @@ pub async fn neighborhood(
     Ok((nodes, edges))
 }
 
+/// 按名字找实体。**一并回总数**——「宁分勿合」本来就会造出一堆同名，
+/// 固定十条的时候，想找的那个可能根本不在这十条里而界面上看不出来。
 pub async fn search_entities(
     pool: &PgPool,
     kb_id: Uuid,
     q: &str,
     limit: i64,
-) -> AppResult<Vec<GraphNode>> {
+    offset: i64,
+) -> AppResult<(Vec<GraphNode>, i64)> {
     let pattern = format!("%{}%", q.trim());
     let nodes: Vec<GraphNode> = sqlx::query_as(&format!(
         "{NODE_SQL} WHERE e.kb_id = $1 AND e.merged_into IS NULL
-         AND e.canonical_name ILIKE $2 ORDER BY degree DESC LIMIT $3"
+         AND e.canonical_name ILIKE $2
+         ORDER BY degree DESC, e.canonical_name LIMIT $3 OFFSET $4"
     ))
     .bind(kb_id)
-    .bind(pattern)
+    .bind(&pattern)
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
-    Ok(nodes)
+    let (total,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM entities e
+          WHERE e.kb_id = $1 AND e.merged_into IS NULL AND e.canonical_name ILIKE $2",
+    )
+    .bind(kb_id)
+    .bind(&pattern)
+    .fetch_one(pool)
+    .await?;
+    Ok((nodes, total))
 }
 
 /// 实体详情：节点信息 + 事实时间线。
@@ -673,6 +728,7 @@ pub async fn low_confidence_facts(
     kb_id: Uuid,
     below: f32,
     limit: i64,
+    offset: i64,
 ) -> AppResult<Vec<FactReviewItem>> {
     let rows: Vec<FactReviewItem> = sqlx::query_as(
         "SELECT f.id, s.canonical_name AS subject_name, COALESCE(r.label, fact_surface_predicate(f.id)) AS predicate_label,
@@ -687,11 +743,12 @@ pub async fn low_confidence_facts(
          LEFT JOIN entities o ON o.id = f.object_id
          WHERE f.kb_id = $1 AND f.invalidated_at IS NULL AND f.confidence < $2
          ORDER BY f.confidence, f.recorded_at DESC
-         LIMIT $3",
+         LIMIT $3 OFFSET $4",
     )
     .bind(kb_id)
     .bind(below)
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -700,7 +757,12 @@ pub async fn low_confidence_facts(
 /// "证据全部停留在旧版"的现行事实（S3 第三刀：文档新版没再确认的知识）。
 /// 判定纯派生自 chunk 存活性——认领机制保证未变段落的证据不被误伤；
 /// 绝不自动删除（没再提 ≠ 不成立），删除/闭合权在 Review 的人手里。
-pub async fn stale_facts(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<Vec<FactReviewItem>> {
+pub async fn stale_facts(
+    pool: &PgPool,
+    kb_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<FactReviewItem>> {
     let rows: Vec<FactReviewItem> = sqlx::query_as(
         "SELECT f.id, s.canonical_name AS subject_name, COALESCE(r.label, fact_surface_predicate(f.id)) AS predicate_label,
                 COALESCE(o.canonical_name, f.object_value->>'summary') AS object_name,
@@ -718,10 +780,11 @@ pub async fn stale_facts(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<Ve
                            JOIN chunks c ON c.id = fe.chunk_id
                            WHERE fe.fact_id = f.id AND c.superseded_at IS NULL)
          ORDER BY f.recorded_at DESC
-         LIMIT $2",
+         LIMIT $2 OFFSET $3",
     )
     .bind(kb_id)
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
     Ok(rows)

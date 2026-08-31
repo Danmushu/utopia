@@ -3,8 +3,8 @@
 use pgvector::Vector;
 use sqlx::PgPool;
 use utopia_core::models::{
-    EntityInstance, EntityTypeView, OntologyImportView, OntologyMiss, RelationTypeView,
-    TypeCandidate,
+    EntityInstance, EntityTypeView, OntologyImportView, OntologyMiss, RelationAxioms,
+    RelationTypeView, TypeCandidate,
 };
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
@@ -16,6 +16,8 @@ pub async fn entity_type_views(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Enti
                       WHERE p.child_id = t.id) AS parents,
                 (SELECT p.parent_id FROM entity_type_parents p
                   WHERE p.child_id = t.id AND p.is_primary) AS primary_parent,
+                ARRAY(SELECT d.b_id FROM entity_type_disjoint d
+                      WHERE d.kb_id = t.kb_id AND d.a_id = t.id) AS disjoint,
                 (SELECT count(*) FROM entities e
                  WHERE e.type_id = t.id AND e.merged_into IS NULL) AS usage
          FROM entity_types t WHERE t.kb_id = $1 ORDER BY lower(t.label)",
@@ -71,7 +73,9 @@ fn validate_shape(shape: &str) -> AppResult<()> {
 
 pub async fn relation_type_views(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<RelationTypeView>> {
     Ok(sqlx::query_as(
-        "SELECT r.id, r.key, r.label, r.temporal, r.functional, r.inverse_functional, r.builtin, r.description,
+        "SELECT r.id, r.key, r.label, r.temporal, r.functional, r.inverse_functional,
+                r.is_transitive, r.is_symmetric, r.is_asymmetric, r.is_irreflexive,
+                r.builtin, r.description,
                 r.kind, r.datatype, r.unit,
                 ARRAY(SELECT d.entity_type_id FROM relation_type_domains d
                       WHERE d.relation_type_id = r.id) AS domains,
@@ -301,8 +305,7 @@ pub async fn create_relation_type(
     key: &str,
     label: &str,
     temporal: &str,
-    functional: bool,
-    inverse_functional: bool,
+    ax: RelationAxioms,
     description: &str,
     kind: &str,
     domains: &[Uuid],
@@ -320,21 +323,28 @@ pub async fn create_relation_type(
     let is_attr = kind == "attribute";
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO relation_types (id, kb_id, key, label, temporal, functional, inverse_functional, description,
-                                     kind, datatype, unit)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        "INSERT INTO relation_types (id, kb_id, key, label, temporal,
+                                     functional, inverse_functional, description,
+                                     kind, datatype, unit,
+                                     is_transitive, is_symmetric,
+                                     is_asymmetric, is_irreflexive)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(id)
     .bind(kb_id)
     .bind(key)
     .bind(label)
     .bind(temporal)
-    .bind(functional)
-    .bind(inverse_functional)
+    .bind(ax.functional)
+    .bind(ax.inverse_functional)
     .bind(description)
     .bind(kind)
     .bind(is_attr.then_some(datatype).flatten())
     .bind(is_attr.then_some(unit).flatten())
+    .bind(ax.transitive)
+    .bind(ax.symmetric)
+    .bind(ax.asymmetric)
+    .bind(ax.irreflexive)
     .execute(pool)
     .await
     .map_err(|e| match &e {
@@ -388,8 +398,7 @@ pub async fn update_relation_type(
     id: Uuid,
     label: &str,
     temporal: &str,
-    functional: bool,
-    inverse_functional: bool,
+    ax: RelationAxioms,
     description: &str,
     datatype: Option<&str>,
     unit: Option<&str>,
@@ -412,20 +421,28 @@ pub async fn update_relation_type(
     // 它们是签名不是身份，"这个属性也适用于承包商" 是个正当的编辑。
     // datatype/unit 只对 attribute 行生效，datatype 缺省保持原值
     let res = sqlx::query(
-        "UPDATE relation_types SET label = $3, temporal = $4, functional = $5, inverse_functional = $6, description = $7,
+        "UPDATE relation_types
+            SET label = $3, temporal = $4,
+                functional = $5, inverse_functional = $6, description = $7,
                 datatype = CASE WHEN kind = 'attribute' AND $8 IS NOT NULL THEN $8 ELSE datatype END,
-                unit = CASE WHEN kind = 'attribute' THEN $9 ELSE unit END
+                unit = CASE WHEN kind = 'attribute' THEN $9 ELSE unit END,
+                is_transitive = $10, is_symmetric = $11,
+                is_asymmetric = $12, is_irreflexive = $13
          WHERE id = $2 AND kb_id = $1",
     )
     .bind(kb_id)
     .bind(id)
     .bind(label)
     .bind(temporal)
-    .bind(functional)
-    .bind(inverse_functional)
+    .bind(ax.functional)
+    .bind(ax.inverse_functional)
     .bind(description)
     .bind(datatype)
     .bind(unit)
+    .bind(ax.transitive)
+    .bind(ax.symmetric)
+    .bind(ax.asymmetric)
+    .bind(ax.irreflexive)
     .execute(pool)
     .await?;
     if res.rows_affected() == 0 {
@@ -1408,6 +1425,48 @@ pub async fn set_disjoint_bulk(
     .bind(&b)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// 把 `others` 设成这个类的**全部**互斥对象（不在其中的解除）。
+///
+/// 与 [`set_disjoint_bulk`] 的分工：那个是导入用的「只增不减」，这个是编辑用的
+/// 「这就是全部」。编辑必须能取消——否则界面上取消勾选没有任何效果，
+/// 而用户会以为自己改了。
+///
+/// 两个方向各写一行，与导入侧一致：查「A 与 B 互斥吗」因此不必关心从哪头问。
+pub async fn set_disjoint_for(
+    pool: &PgPool,
+    kb_id: Uuid,
+    class: Uuid,
+    others: &[Uuid],
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    // 先清掉这个类参与的全部互斥边——两个方向都要清，因为它两边都可能出现
+    sqlx::query(
+        "DELETE FROM entity_type_disjoint
+          WHERE kb_id = $1 AND (a_id = $2 OR b_id = $2)",
+    )
+    .bind(kb_id)
+    .bind(class)
+    .execute(&mut *tx)
+    .await?;
+    for other in others {
+        if *other == class {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO entity_type_disjoint (kb_id, a_id, b_id)
+             VALUES ($1, $2, $3), ($1, $3, $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(kb_id)
+        .bind(class)
+        .bind(other)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

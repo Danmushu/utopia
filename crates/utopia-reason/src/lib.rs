@@ -12,6 +12,9 @@
 //! 没声明就不查——不报矛盾比猜一个公理出来安全。所以一个没装本体包的库跑出来
 //! 是零，那是实情不是故障。
 
+pub mod derive;
+pub mod ontology;
+
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -43,7 +46,9 @@ impl Axioms {
     }
 }
 
-/// 查出来的一处矛盾。`reason` 直接进 `fact_conflicts.reason`。
+/// 查出来的一处矛盾。落库在 `axiom_violations`——**不进 `fact_conflicts`**：
+/// 那张表问的是「哪条对」，而公理违规问的是「错在数据还是错在定义」，
+/// 后者的出路可能是去改本体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub kind: Kind,

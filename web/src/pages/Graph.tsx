@@ -24,7 +24,14 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { api, type EntityFact, type Evidence, type GraphEdge, type GraphNode } from "../api";
+import {
+  api,
+  type DerivedFact,
+  type EntityFact,
+  type Evidence,
+  type GraphEdge,
+  type GraphNode,
+} from "../api";
 import { S } from "../i18n";
 import { useKb } from "../kb";
 import { toast } from "../toast";
@@ -42,6 +49,16 @@ const RING_HOVERED = "#8FE7FF"; // 悬停冰青环
 const EDGE_COLOR = "rgba(163,163,163,0.2)"; // 纯灰（应用户要求，不用钢蓝）
 // 本体没认下的关系：同色更淡。名字来自原文，不该跟词表里的关系看着一样重
 const EDGE_COLOR_INFERRED = "rgba(163,163,163,0.1)";
+// 推出来的边（R1）。**跟上面两者说的不是一件事**：那两个说「这条边的名字从哪来」，
+// 这个说「这条边根本不是谁说的，是引擎推的」。所以给它自己的色相而不是再淡一档灰——
+// 用户要在余光里就分得出「文档里写的」和「推出来的」
+const EDGE_COLOR_DERIVED = "rgba(231,197,124,0.42)";
+const EDGE_COLOR_DERIVED_DIM = "rgba(231,197,124,0.14)";
+// 呼吸周期。动画不是为了好看，是因为静态的一个色差在几百条边里根本注意不到
+const DERIVED_PULSE_MS = 2200;
+// 超过这个数就只上色不动画。**写出来而不是悄悄降级**：每帧重算几千条边的颜色，
+// 换来的是拖不动图，而那时候用户要的是能拖得动
+const DERIVED_ANIMATE_MAX = 400;
 // 注意：sigma 边着色器在预乘混合(ONE, ONE_MINUS_SRC_ALPHA)下不预乘 RGB，
 // alpha 无法压暗边——暗度必须编码进 RGB（不透明近背景色）
 const EDGE_DIM = "#141414";
@@ -241,6 +258,10 @@ export function Graph() {
   const [searchInput, setSearchInput] = useState("");
   const [searchQ, setSearchQ] = useState("");
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
+  // 推出来的边显不显示。默认显示——推理默认关着，有派生就意味着用户开过开关
+  const [showDerived, setShowDerived] = useState(true);
+  // 信息窗默认收起：它答的是「什么时候推的」，那是偶尔才问的问题
+  const [derivedPanel, setDerivedPanel] = useState(false);
   /** null = 全时段；数值 = as-of 时刻(ms)。
       默认 as-of 今天：时态平台的图谱默认呈现"现在的世界"，
       已闭合的事实不该与现行事实无差别并列（All time 是显式选择） */
@@ -264,10 +285,15 @@ export function Graph() {
 
   // 全图模式走全库实体搜索；子图模式只在已加载的子图内客户端过滤
   const inSubgraph = !!focusEntity;
+  // 搜到的条数上限。**「加载更多」而不是翻页**：这是个下拉建议框，
+  // 用户在找一个具体的实体，翻页会让他丢掉刚才扫过的那几条
+  const [searchLimit, setSearchLimit] = useState(10);
+  useEffect(() => setSearchLimit(10), [searchQ]);
   const candidates = useQuery({
-    queryKey: ["entitySearch", kb?.id, searchQ],
-    queryFn: () => api.searchEntities(kb!.id, searchQ),
+    queryKey: ["entitySearch", kb?.id, searchQ, searchLimit],
+    queryFn: () => api.searchEntities(kb!.id, searchQ, searchLimit),
     enabled: !!kb && searchQ.length > 0 && !inSubgraph,
+    placeholderData: (prev) => prev,
   });
   const subgraphHits = useMemo(() => {
     if (!inSubgraph || !searchQ || !data.data) return [];
@@ -292,7 +318,15 @@ export function Graph() {
     hiddenTypes: Set<string>;
     activeNodes: Set<string> | null;
     activeEdges: Set<string> | null;
-  }>({ hiddenTypes: new Set(), activeNodes: null, activeEdges: null });
+    /** 推出来的边显不显示。**默认显示**——推理默认是关的，所以有派生边就意味着
+     *  用户主动开过开关；但要能一键藏起来，看「只有人说过的那张图」长什么样 */
+    showDerived: boolean;
+  }>({
+    hiddenTypes: new Set(),
+    activeNodes: null,
+    activeEdges: null,
+    showDerived: true,
+  });
   const playingRef = useRef(false);
   /* 播放淡入表：本轮新激活的节点/边 id → 激活时刻（rAF 循环驱动至到位） */
   const fadeRef = useRef<Map<string, number>>(new Map());
@@ -336,6 +370,13 @@ export function Graph() {
     }
     return [...map.entries()];
   }, [data.data]);
+
+  // 有几条推出来的边。**为零时那个开关整个不出现**——一个没开推理的库不该
+  // 看到一个永远切换不出任何变化的按钮
+  const derivedCount = useMemo(
+    () => (data.data?.edges ?? []).filter((e) => e.derived).length,
+    [data.data],
+  );
 
   /* 时间过滤：计算 T 时刻的活跃边/节点集合 */
   const recomputeActive = useCallback(
@@ -384,8 +425,19 @@ export function Graph() {
 
   useEffect(() => {
     filterRef.current.hiddenTypes = hiddenTypes;
+    filterRef.current.showDerived = showDerived;
     sigmaRef.current?.refresh();
-  }, [hiddenTypes]);
+  }, [hiddenTypes, showDerived]);
+
+  // 派生边的呼吸。**只在有派生边、且开着显示、且数量不多时才转**——
+  // 一个没开推理的库不该为这件事每两秒重画一次
+  useEffect(() => {
+    const n = derivedCount;
+    if (!showDerived || n === 0 || n > DERIVED_ANIMATE_MAX) return;
+    // 与 sigma 的重绘同频即可，不必每帧：呼吸是慢动作，30 fps 看不出差别
+    const timer = setInterval(() => sigmaRef.current?.refresh(), 1000 / 30);
+    return () => clearInterval(timer);
+  }, [showDerived, derivedCount]);
 
   useEffect(() => {
     selectedRef.current = selected;
@@ -421,8 +473,14 @@ export function Graph() {
         g.addEdgeWithKey(e.id, e.source, e.target, {
           label: e.label?.toUpperCase() ?? "",
           size: 1,
-          color: e.inferred ? EDGE_COLOR_INFERRED : EDGE_COLOR,
+          color: e.derived
+            ? EDGE_COLOR_DERIVED
+            : e.inferred
+              ? EDGE_COLOR_INFERRED
+              : EDGE_COLOR,
           type: "line",
+          // reducer 每帧读它：决定要不要藏、要不要呼吸
+          derived: e.derived,
         });
       }
     }
@@ -617,6 +675,21 @@ export function Graph() {
           res.hidden = true;
           return res;
         }
+        // 推出来的边：先看藏不藏，再决定呼吸到哪一档。
+        // **放在最前面**——藏起来的边不必再算后面那些提亮/压暗
+        const isDerived = attrs.derived === true;
+        if (isDerived) {
+          if (!f.showDerived) {
+            res.hidden = true;
+            return res;
+          }
+          res.color = lerpColor(
+            EDGE_COLOR_DERIVED_DIM,
+            EDGE_COLOR_DERIVED,
+            // 三角波而不是正弦：两端各停一瞬，看起来是「呼吸」不是「闪」
+            Math.abs(((performance.now() % DERIVED_PULSE_MS) / DERIVED_PULSE_MS) * 2 - 1),
+          );
+        }
         // hover: 只提亮关联边；selected: 提亮关联边 + 压暗其余
         const hov = hoverRef.current;
         const sel =
@@ -746,6 +819,11 @@ export function Graph() {
   const empty = data.isSuccess && data.data.nodes.length === 0;
   const nodeCount = data.data?.nodes.length ?? 0;
   const edgeCount = data.data?.edges.length ?? 0;
+  // 库里一共有多少。**与画上去的不是一回事**——邻域视图没有总数（它本来就只
+  // 是一小片），所以缺省回落到画上去的那个数，不会显示成「共 0 个」
+  const totalNodes = data.data?.total_nodes ?? nodeCount;
+  const totalEdges = data.data?.total_edges ?? edgeCount;
+  const capped = totalNodes > nodeCount;
 
   return (
     <div className="h-full relative">
@@ -786,6 +864,20 @@ export function Graph() {
                   <span className="ml-auto text-xs text-neutral-500">{c.type_label}</span>
                 </button>
               ))}
+              {/* 还有更多没显示。**说清剩多少**——从前固定十条，想找的那个
+                  不在这十条里的时候，界面上一点线索都没有。子图内搜索是客户端
+                  过滤，没有「更多」这回事 */}
+              {!inSubgraph &&
+                (candidates.data?.total ?? 0) > searchHits.length && (
+                  <button
+                    onClick={() => setSearchLimit((n) => n + 20)}
+                    className="w-full border-t border-white/10 px-3 py-1.5 text-left text-xs text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
+                  >
+                    {S.graph.searchMore(
+                      candidates.data!.total - searchHits.length,
+                    )}
+                  </button>
+                )}
             </div>
           )}
         </div>
@@ -822,11 +914,65 @@ export function Graph() {
               <span className="text-neutral-300">{t.label}</span>
             </button>
           ))}
+          {/* 推出来的边：与类型图例同一条，因为它们是同一种动作——决定图上
+              显示什么。为零时不出现 */}
+          {derivedCount > 0 && (
+            <div className="relative flex items-center gap-1">
+              <button
+                onClick={() => setShowDerived((v) => !v)}
+                title={S.graph.derivedHint}
+                className={`glass rounded-full px-2.5 py-1 text-[11px] flex items-center gap-1.5 transition-opacity ${
+                  showDerived ? "" : "opacity-35"
+                }`}
+              >
+                <span
+                  className="h-2 w-2 rounded-full"
+                  style={{ background: "rgba(231,197,124,0.9)" }}
+                />
+                <span className="text-neutral-300">
+                  {S.graph.derivedEdges(derivedCount)}
+                </span>
+              </button>
+              {/* 展开成一个小窗：这批边是什么时候推的、现在还推不推、手动再跑一次。
+                  **与开关分成两个按钮**——「藏起来」是每天要点的，「什么时候推的」
+                  是偶尔才问的，合成一个会让常用动作多一步 */}
+              <button
+                onClick={() => setDerivedPanel((v) => !v)}
+                title={S.graph.derivedPanel}
+                aria-expanded={derivedPanel}
+                className={`glass rounded-full h-[22px] w-[22px] text-[11px] leading-none text-neutral-400 hover:text-neutral-100 transition-colors ${
+                  derivedPanel ? "text-neutral-100" : ""
+                }`}
+              >
+                ⋯
+              </button>
+              {derivedPanel && kb && (
+                <DerivedPanel
+                  kbId={kb.id}
+                  count={derivedCount}
+                  onClose={() => setDerivedPanel(false)}
+                />
+              )}
+            </div>
+          )}
         </div>
 
         <div className="ml-auto pointer-events-none pt-0.5 u-num text-[11px] text-neutral-500">
           {stabilizing && <span className="text-neutral-400">{S.graph.stabilizing} · </span>}
-          {S.graph.stats(nodeCount, edgeCount, timeT === null ? edgeCount : activeCount)}
+          {/* 画满上限时说清「画了多少 / 共多少」。**这个数从前是上限冒充规模**——
+              一个上万实体的库右上角永远写着 150 */}
+          {capped ? (
+            <span title={S.graph.cappedHint(nodeCount, totalNodes)}>
+              {S.graph.statsCapped(
+                nodeCount,
+                totalNodes,
+                totalEdges,
+                timeT === null ? edgeCount : activeCount,
+              )}
+            </span>
+          ) : (
+            S.graph.stats(nodeCount, edgeCount, timeT === null ? edgeCount : activeCount)
+          )}
         </div>
       </div>
 
@@ -1174,6 +1320,147 @@ function fmtInterval(f: EntityFact): string {
   return from ? `${from} ~ ${end}` : `~ ${end}`;
 }
 
+/** 一条推出来的事实，**证明摊开在下面**。
+ *
+ * 不做折叠：这一档存在的全部理由就是「这条边不是谁说的，是这么来的」，
+ * 把前提藏在一次点击后面等于把理由藏起来。链最长十二条，摊开也不长。 */
+/** 派生开关旁边那个小窗：**这批边是什么时候、按什么推出来的，以及现在还准不准**。
+ *
+ * 存在的理由是「新鲜度看不见」。派生每小时重推一次，而事实每篇文档进来都在变——
+ * 一条派生边看上去和它刚推出来的时候一模一样，可它依据的前提可能三分钟前刚被撤掉。
+ * 光有开关答不了「我现在看到的是什么时候的结论」。
+ *
+ * 手动按钮留在这里而不是别处：想重推的人正是刚看完这三行、觉得数字太旧的那个人。
+ */
+function DerivedPanel({
+  kbId,
+  count,
+  onClose,
+}: {
+  kbId: string;
+  count: number;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const kb = useQuery({
+    queryKey: ["kbOne", kbId],
+    queryFn: () => api.kbDetail(kbId),
+  });
+  const run = useMutation({
+    mutationFn: () => api.runInference(kbId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["graph"] });
+      qc.invalidateQueries({ queryKey: ["kbOne", kbId] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const on = kb.data?.materialize_inferences ?? false;
+  const last = kb.data?.last_inference_at;
+  // 「多久以前」比一个时间戳好读——问题是「新不新」，不是「几点」
+  const age = last ? Math.round((Date.now() - new Date(last).getTime()) / 60000) : null;
+
+  return (
+    <div className="glass-strong pointer-events-auto absolute left-0 top-8 z-20 w-72 rounded-xl p-3 shadow-xl">
+      <div className="flex items-baseline gap-2">
+        <span className="text-[13px] text-neutral-100">{S.graph.derivedPanel}</span>
+        <button
+          className="ml-auto text-neutral-500 hover:text-neutral-200"
+          onClick={onClose}
+          aria-label={S.graph.close}
+        >
+          ×
+        </button>
+      </div>
+
+      <dl className="mt-2 space-y-1 text-[11px]">
+        <div className="flex justify-between gap-3">
+          <dt className="text-neutral-500">{S.graph.derivedCountLabel}</dt>
+          <dd className="u-num text-neutral-200">{count}</dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-neutral-500">{S.graph.derivedStateLabel}</dt>
+          <dd className={on ? "text-neutral-200" : "text-[var(--u-warn)]"}>
+            {on ? S.graph.derivedOn(kb.data!.inference_interval_minutes) : S.graph.derivedOff}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-neutral-500">{S.graph.derivedLastLabel}</dt>
+          <dd className="u-num text-neutral-200">
+            {age === null ? S.graph.derivedNever : S.graph.derivedAgo(age)}
+          </dd>
+        </div>
+      </dl>
+
+      {/* 上一次手动跑的结果留在这儿。**推出多少、作废多少要分开说**——
+          「什么都没变」和「换掉了三十条」是两件很不一样的事 */}
+      {run.data && (
+        <p className="mt-2 text-[11px] text-neutral-400">
+          {run.data.inserted === 0 && run.data.invalidated === 0
+            ? S.graph.derivedNoChange
+            : S.graph.derivedChanged(run.data.inserted, run.data.invalidated)}
+          {run.data.capped > 0 && ` · ${S.graph.derivedCapped(run.data.capped)}`}
+        </p>
+      )}
+
+      <button
+        className="u-btn u-btn-primary mt-2.5 w-full py-1 text-[11px]"
+        disabled={!on || run.isPending}
+        title={on ? undefined : S.err.inference_off}
+        onClick={() => run.mutate()}
+      >
+        {run.isPending ? S.graph.derivedRunning : S.graph.derivedRun}
+      </button>
+    </div>
+  );
+}
+
+function DerivedRow({
+  d,
+  onNavigate,
+}: {
+  d: DerivedFact;
+  onNavigate: (entityId: string) => void;
+}) {
+  return (
+    <div className="glass rounded-xl p-3">
+      <div className="flex items-baseline gap-1.5 flex-wrap text-sm">
+        <button
+          className="text-neutral-100 hover:text-white underline-offset-2 hover:underline"
+          onClick={() => onNavigate(d.subject_id)}
+        >
+          {d.subject}
+        </button>
+        <span className="text-xs text-neutral-500">{d.predicate}</span>
+        <button
+          className="text-neutral-100 hover:text-white underline-offset-2 hover:underline"
+          onClick={() => onNavigate(d.object_id)}
+        >
+          {d.object}
+        </button>
+        <span className="ml-auto text-[10px] text-[var(--u-warn)]">
+          {d.rule === "transitive"
+            ? S.graph.ruleTransitive
+            : S.graph.ruleSymmetric}
+        </span>
+      </div>
+      {/* 证明：前提按推导顺序，缩进一格。看得出链是怎么走的 */}
+      <ol className="mt-2 space-y-0.5 border-l border-[var(--u-line)] pl-2.5">
+        {d.premises.map((p, i) => (
+          <li key={i} className="text-[11px] text-neutral-400">
+            {p}
+          </li>
+        ))}
+      </ol>
+      {d.premises.length === 0 && (
+        <p className="mt-1 text-[11px] text-neutral-600">
+          {S.graph.derivedNoProof}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function EntityPanel({
   kbId,
   entityId,
@@ -1190,9 +1477,14 @@ function EntityPanel({
     queryFn: () => api.entityDetail(kbId, entityId),
   });
   const [openFact, setOpenFact] = useState<string | null>(null);
+  // 推出来的那些。**单独一个键，不掺进 facts**——混在一个列表里，用户看不出
+  // 「文档里写的」和「引擎推的」的区别
+  const derived = detail.data?.derived ?? [];
   // Relations = 按关系分组（查关系）；Timeline = 有效时间轴（事情何时成立）；
   // History = 记录时间轴（我们何时这么认为、又何时改了主意）
-  const [view, setView] = useState<"relations" | "timeline" | "history">("relations");
+  const [view, setView] = useState<
+    "relations" | "timeline" | "history" | "derived"
+  >("relations");
 
   const e: GraphNode | undefined = detail.data?.entity;
 
@@ -1201,7 +1493,27 @@ function EntityPanel({
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [draftType, setDraftType] = useState("");
-  const [sameName, setSameName] = useState<GraphNode[]>([]);
+  // 同名的其他实体：详情接口打开就给。改名之后再用响应里的那份覆盖——
+  // 改完名可能撞上一批新的同名，那时候的答案比打开时的新
+  const [renamedPeers, setRenamedPeers] = useState<GraphNode[] | null>(null);
+  const sameName = renamedPeers ?? detail.data?.same_name ?? [];
+  const setSameName = setRenamedPeers;
+  // 手动合并：把同名的那个并进**当前这个**。方向写死是有意的——
+  // 用户正在看的就是他判断为「主」的那一个
+  const merge = useMutation({
+    mutationFn: (source: string) => api.mergeEntities(kbId, source, entityId),
+    onSuccess: () => {
+      toast.success(S.toast.saved);
+      // 本地把并掉的那个摘掉，别等重取——它已经不存在了，留着会让人再点一次
+      setSameName((prev) =>
+        (prev ?? sameName).filter((p) => p.id !== merge.variables),
+      );
+      qc.invalidateQueries({ queryKey: ["entity", kbId, entityId] });
+      qc.invalidateQueries({ queryKey: ["graph"] });
+      qc.invalidateQueries({ queryKey: ["review", kbId] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
   // 类型下拉要的是全量本体，不是当前视图里出现过的那几个
   const ontology = useQuery({
     queryKey: ["ontology", kbId],
@@ -1396,18 +1708,33 @@ function EntityPanel({
               <X size={11} />
             </button>
           </div>
-          <div className="mt-1.5 flex flex-wrap gap-1">
+          {/* 每个同名的给两个动作：去看它，或者把它并进来。
+              **方向写死成「并进当前这个」**——合并有方向（源消失、事实搬到目标上），
+              而当前打开的这个就是用户正在看、正在判断的那一个 */}
+          <div className="mt-1.5 space-y-1">
             {sameName.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => onNavigate(p.id)}
-                className="text-[11px] px-1.5 py-0.5 rounded bg-white/[0.06] text-neutral-300 hover:bg-white/10"
-              >
-                {p.type_label ?? S.graph.untyped}
-                {p.disambiguator && p.disambiguator !== p.type_label
-                  ? ` · ${p.disambiguator}`
-                  : ""}
-              </button>
+              <div key={p.id} className="flex items-center gap-1">
+                <button
+                  onClick={() => onNavigate(p.id)}
+                  className="min-w-0 flex-1 truncate text-left text-[11px] px-1.5 py-0.5 rounded bg-white/[0.06] text-neutral-300 hover:bg-white/10"
+                >
+                  {p.type_label ?? S.graph.untyped}
+                  {p.disambiguator && p.disambiguator !== p.type_label
+                    ? ` · ${p.disambiguator}`
+                    : ""}
+                </button>
+                <button
+                  className="shrink-0 text-[11px] px-1.5 py-0.5 rounded text-neutral-400 hover:bg-white/10 hover:text-neutral-100"
+                  disabled={merge.isPending}
+                  title={S.graph.mergeIntoHint}
+                  onClick={() => {
+                    if (confirm(S.graph.mergeConfirm(p.name, e?.name ?? "")))
+                      merge.mutate(p.id);
+                  }}
+                >
+                  {S.graph.mergeInto}
+                </button>
+              </div>
             ))}
           </div>
         </div>
@@ -1416,7 +1743,13 @@ function EntityPanel({
       {/* 视图切换：Relations（分组）| Timeline（年表） */}
       <div className="px-4 pt-2.5">
         <div className="flex rounded-lg overflow-hidden border border-white/10 w-fit">
-          {(["relations", "timeline", "history"] as const).map((v) => (
+          {(
+            ["relations", "timeline", "history", "derived"] as const
+          )
+            // 推出来的那一档：**没有派生就不出现**。一个没开推理的库不该看到
+            // 一个永远是空的标签页
+            .filter((v) => v !== "derived" || derived.length > 0)
+            .map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -1430,7 +1763,9 @@ function EntityPanel({
                 ? S.graph.viewRelations
                 : v === "timeline"
                   ? S.graph.viewTimeline
-                  : S.graph.viewHistory}
+                  : v === "history"
+                    ? S.graph.viewHistory
+                    : S.graph.viewDerived}
             </button>
           ))}
         </div>
@@ -1482,9 +1817,21 @@ function EntityPanel({
           />
         )}
         {view === "history" && <EntityHistory kbId={kbId} entityId={entityId} />}
-        {view !== "history" && detail.data?.facts.length === 0 && (
-          <p className="text-sm text-neutral-500 p-2">{S.graph.noFacts}</p>
+        {view === "derived" && (
+          <div className="space-y-2">
+            <p className="px-2 pb-1 text-[11px] leading-relaxed text-neutral-500">
+              {S.graph.derivedHint}
+            </p>
+            {derived.map((d) => (
+              <DerivedRow key={d.id} d={d} onNavigate={onNavigate} />
+            ))}
+          </div>
         )}
+        {view !== "history" &&
+          view !== "derived" &&
+          detail.data?.facts.length === 0 && (
+            <p className="text-sm text-neutral-500 p-2">{S.graph.noFacts}</p>
+          )}
       </div>
     </div>
   );

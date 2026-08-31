@@ -66,6 +66,9 @@ export const en = {
     only_postgres: "Only PostgreSQL is supported for now.",
     bad_conn_string: "A connection string starts with postgres://",
     concurrency_range: "Pick a number between 1 and 256.",
+    inference_off:
+      "Materialized inference is off for this knowledge base. Turn it on in Settings.",
+    bad_resolution: "That is not a valid decision.",
   },
   /** 机器给的补充（cron 解析器的原话之类）缀在措辞后面 */
   errDetail: (msg: string, detail: string) => `${msg} (${detail})`,
@@ -291,6 +294,14 @@ export const en = {
     emptyPull: "No documents yet — they arrive when this source syncs.",
     filterPlaceholder: "Filter by name",
     filterNoMatch: "No documents match your filter.",
+    anyStatus: "Any extraction state",
+    statusFailed: "Failed",
+    statusDone: "Extracted",
+    statusQueued: "Queued",
+    statusExtracting: "Extracting",
+    statusNone: "Not extracted",
+    retryFailed: (n: number) => `Retry ${n} failed`,
+    retryQueued: (n: number) => `${n} queued for extraction`,
     colFile: "File",
     colStatus: "Status",
     colGraph: "Graph",
@@ -513,6 +524,10 @@ export const en = {
     untitled: "Untitled",
     noConversations: "No conversations yet.",
     deleteConversation: "Delete conversation",
+    searchConversations: "Search chats",
+    moreActions: "More",
+    rename: "Rename",
+    copyTitle: "Copy title",
     deleteTitle: "Delete conversation?",
     deleteHint: (name: string) =>
       `“${name}” and its messages will be permanently removed.`,
@@ -522,6 +537,7 @@ export const en = {
   graph: {
     // 还没判出类型的实体（0009）。不是一个类，是"这一格还空着"
     untyped: "Untyped",
+    searchMore: (n: number) => `${n} more — load 20`,
     zoomIn: "Zoom in",
     zoomOut: "Zoom out",
     fitView: "Fit view",
@@ -573,10 +589,38 @@ export const en = {
         ? "One other entity shares this name."
         : `${n} other entities share this name.`,
     sameNameHint: "If they are the same thing, merge them under Review.",
+    mergeInto: "Merge in",
+    mergeIntoHint:
+      "Fold that entity into this one. Its facts move here; merges can be reverted.",
+    mergeConfirm: (from: string, into: string) =>
+      `Merge “${from}” into “${into}”? Its facts move here. You can revert this from Review.`,
     viewRelations: "Relations",
     viewTimeline: "Timeline",
     /* 第三视图：记录时间轴——不是"事情何时发生"，而是"我们何时这么认为" */
     viewHistory: "History",
+    viewDerived: "Derived",
+    derivedEdges: (n: number) => `${n} derived`,
+    derivedHint:
+      "Edges no one asserted — the engine worked them out from axioms your ontology declares. Each one shows the premises it came from.",
+    derivedNoProof: "The premises are gone.",
+    derivedPanel: "Inference",
+    derivedCountLabel: "Edges derived",
+    derivedStateLabel: "Schedule",
+    derivedLastLabel: "Last run",
+    derivedOn: (mins: number) => `every ${mins} min`,
+    derivedOff: "off",
+    derivedNever: "never",
+    derivedAgo: (mins: number) =>
+      mins < 1 ? "just now" : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`,
+    derivedRun: "Run now",
+    derivedRunning: "Running…",
+    derivedNoChange: "Nothing changed.",
+    derivedChanged: (added: number, gone: number) =>
+      `${added} added · ${gone} retracted`,
+    derivedCapped: (n: number) => `${n} predicate(s) not closed fully`,
+    close: "Close",
+    ruleTransitive: "transitive",
+    ruleSymmetric: "symmetric",
     historyHint: "How this entity's record changed — and who changed it.",
     historyEmpty: "Nothing recorded for this entity yet.",
     historyKind: {
@@ -608,6 +652,12 @@ export const en = {
     endedUnknown: "ended, date unknown",
     stats: (n: number, e: number, active: number) =>
       `${n} entities · ${e} facts · ${active} active`,
+    /** 画布只画度数最高的一批。**说清楚画了多少、共多少**——从前这里写的是
+     *  上限，一个上万实体的库右上角永远是 150 */
+    statsCapped: (shown: number, total: number, e: number, active: number) =>
+      `showing ${shown} of ${total} entities · ${e} facts · ${active} active`,
+    cappedHint: (shown: number, total: number) =>
+      `The canvas draws the ${shown} best-connected entities of ${total}. Search to reach the rest.`,
     stabilizing: "Stabilizing layout",
     allTime: "All time",
     nowBtn: "Now",
@@ -725,6 +775,26 @@ export const en = {
     newProperty: "New property",
     filter: "Filter…",
     missesShort: "Unmatched",
+    refineShort: "Refine types",
+    refineTitle: "Refine types",
+    refineHint:
+      "Entities whose class is roughly right but not the most specific one available. Look first, then apply — retyping does not appear on any timeline, so this is the only place you get to see it before it happens.",
+    refinePreview: "Look first",
+    refineLooking: "Looking…",
+    refineRun: "Run and apply",
+    refineRunning: "Running…",
+    refineNothing: "Nothing to refine.",
+    refineCandidates: (n: number) => `${n} entities would be considered`,
+    refineNoCandidates: "Retrieval found no class for this one.",
+    refineModelSays: (t: string) => `the model called it “${t}”`,
+    refineRetyped: (n: number) => `${n} retyped automatically`,
+    refineUndo: "Undo this batch",
+    refineUndone: (n: number) => `${n} put back`,
+    refineForReview: (n: number) => `${n} need your call`,
+    refineCrossesAxis: "different axis",
+    refineApprovePair: "Approve this class pair",
+    refineLeftAlone: (n: number) => `${n} left alone`,
+    refineTopCandidate: (c: string) => `closest class was ${c}`,
     instances: "Instances",
     instanceFacts: (n: number) => `${n} facts`,
     description: "Description",
@@ -754,6 +824,12 @@ export const en = {
     shapeColor: "Shape & color",
     parent: "Parent class",
     noParent: "(top level)",
+    disjoint: "Cannot also be",
+    disjointHint:
+      "Classes nothing can belong to at the same time. A Person is not an Organisation. The consistency check uses this to find classes that can never have an instance.",
+    noDisjoint: "No class excluded",
+    disjointWithParent:
+      "This class inherits from a class it says it cannot be — nothing could ever satisfy it.",
     /* 多父时左栏只能画一处，说明画在哪一支下 */
     primaryParentHint: "Shown in the tree under the first one.",
     /* 类型签名。措辞要说清它是引导不是闸门——本体写错时模型仍可覆盖 */
@@ -772,6 +848,21 @@ export const en = {
     temporalEternal: "Eternal (timeless)",
     functional: "Functional (single value at a time)",
     inverseFunctional: "Inverse functional (one subject per object at a time)",
+    axioms: "Axioms",
+    axiomsHint:
+      "What this relation guarantees. These are not descriptions — they change what the system does: the temporal engine closes old values, and the reasoning engine adds edges to the graph.",
+    functionalHint: "One subject, one value at a time. A new value closes the old one.",
+    inverseFunctionalHint: "One object, one subject. A project has one lead.",
+    transitive: "Transitive",
+    transitiveHint: "A→B and B→C means A→C. The engine will add those edges.",
+    symmetric: "Symmetric",
+    symmetricHint: "A→B means B→A. The engine will add the other direction.",
+    asymmetric: "Asymmetric",
+    asymmetricHint: "A→B rules out B→A. Both directions get reported as a contradiction.",
+    irreflexive: "Irreflexive",
+    irreflexiveHint: "Nothing can point at itself through this relation.",
+    axiomConflict:
+      "Symmetric and asymmetric together hold only for a relation with no facts at all — one of the two is wrong.",
     usage: (n: number) => `${n} in use`,
     builtin: "built-in",
     save: "Save",
@@ -904,6 +995,8 @@ export const en = {
     railUnconfirmed: "Unconfirmed",
     railLowConfidence: "Low confidence",
     railMappings: "Semantic layer",
+    railViolations: "Axioms",
+    railDefects: "Ontology",
     railDecisions: "Decisions",
     railMerges: "Merges",
     categoryEmpty: "This queue is clear.",
@@ -949,6 +1042,49 @@ export const en = {
     merge: "Merge",
     keep: "Keep separate",
     lowConfidence: "Low-confidence facts",
+    defects: "Ontology contradicts itself",
+    defectsHint:
+      "Problems in the definitions themselves — no facts involved. These come first: while a definition contradicts itself, every fact-level finding that rests on it is suspect.",
+    defectSymAsym: "Declared both symmetric and asymmetric",
+    defectTransFunc: "Transitive and functional at once",
+    defectCycle: "subClassOf runs in a circle",
+    defectDisjointAncestor: "Disjoint with its own ancestor",
+    defectInheritsDisjoint: "Inherits from two disjoint classes",
+    defectNeverInstantiable: "no instance can ever satisfy it",
+    defectFixed: "I fixed the ontology",
+    defectAccepted: "Leave it",
+    runInference: "Run inference",
+    inferring: "Inferring…",
+    inferenceNoRules:
+      "No transitive or symmetric property is declared, so there is no rule to run.",
+    inferenceAdded: (n: number) => `${n} facts derived`,
+    inferenceRetracted: (n: number) => `${n} retracted`,
+    inferenceNothing: "Nothing new to derive",
+    inferenceCapped: (n: number) =>
+      `${n} predicate(s) hit the per-predicate limit and were not closed fully`,
+    violations: "Axiom violations",
+    violationsHint:
+      "Facts that contradict axioms your ontology declares. Nothing here is a guess — a predicate that declares no axioms is never checked.",
+    violationSelfLoop: "Points at itself",
+    violationAsymmetry: "Both directions asserted",
+    violationCycle: "Cycle through the transitive chain",
+    violationFunctional: "Should hold one value, holds two",
+    violationVia: (p: string) => `via ${p}`,
+    violationPath: (n: number) => `${n} facts in the cycle`,
+    retractFact: "Data is wrong",
+    relaxAxiom: "Axiom is wrong",
+    acceptBoth: "Both are right",
+    runCheck: "Run check",
+    checkNeverRun:
+      "Not checked yet. Contradictions are found by asking your ontology, so a run here only reports what its axioms actually say.",
+    checking: "Checking…",
+    checkNoAxioms:
+      "No axioms declared, so nothing could be checked. Import an ontology that declares them.",
+    checkFound: (n: number) => `${n} new`,
+    /** 算出来了，但都是已经在队列里或已被裁决过的——说「3 处矛盾」而列表只有
+     *  一条会让人以为界面漏了东西 */
+    checkNothingNew: "Nothing new",
+    checkClean: (n: number) => `${n} facts checked, no contradictions`,
     mappings: "Semantic layer",
     mappingsHint:
       "Proposed mappings from a business concept to how it is computed. Confirm one and Ask uses it instead of guessing from the schema.",
@@ -1005,6 +1141,12 @@ export const en = {
       "facts that were waiting for it. Every change is listed and can be undone. Turning this " +
       "off does not stop Utopia from noticing — the phrases still collect under Unmatched, they " +
       "just wait for you to approve them.",
+    materialize: "Materialize inferences",
+    materializeNote:
+      "Write facts the ontology entails into the ledger — transitive chains and symmetric pairs. Off by default: a declaration can be wrong, and this one changes the graph. Derived facts are marked and can be taken back.",
+    inferEvery: "Re-derive every",
+    minutes: "minutes",
+    lastInference: (when: string) => `last run ${when}`,
     /* 语料语言。措辞要把"这不是界面语言"讲清楚，否则一定有人当成界面开关 */
     ontologyLang: "Language of this ontology",
     ontologyLangNote:
@@ -1039,6 +1181,11 @@ export const en = {
     activity: "Activity",
     activityHint:
       "Who changed what in this knowledge base. Pure audit — records are append-only.",
+    auditAllActions: "All actions",
+    auditSince: "From this date",
+    auditUntil: "Up to this date",
+    auditClear: "Clear filters",
+    auditTotal: (n: number) => `${n} events`,
     activityEmpty: "Nothing recorded yet.",
     deletedUser: "a removed user",
     auditActions: {
@@ -1087,6 +1234,10 @@ export const en = {
     deactivate: "Deactivate",
     deactivateHint:
       "Cuts off access everywhere — sign-in and any token already issued. What they did stays attributed to them.",
+    deactivatedTitle: "Deactivated accounts",
+    deactivatedHint:
+      "They cannot sign in and do not appear in any member list. What they did is still attributed to them — that is why the account is kept rather than deleted.",
+    reactivate: "Restore",
     deactivateConfirm: (name: string) =>
       `Deactivate ${name}? They lose access everywhere. Their past decisions stay on record.`,
     pickUser: "Select a user to add…",

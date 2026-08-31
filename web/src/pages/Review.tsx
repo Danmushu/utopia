@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
+  type AxiomViolation,
+  type ReviewQueue,
+  type OntologyDefect,
   type ConceptMapping,
   type ConflictItem,
   type FactReviewItem,
@@ -12,7 +15,7 @@ import {
 } from "../api";
 import { S } from "../i18n";
 import { useKb } from "../kb";
-import { Chip, type ChipTone, Pager, RAIL_CLS, pageSlice, cn } from "../ui";
+import { Chip, type ChipTone, Pager, RAIL_CLS, cn } from "../ui";
 
 const DUP_PAGE = 6;
 const FACT_PAGE = 10;
@@ -443,6 +446,138 @@ function DecisionRow({ e }: { e: ReviewHistoryEvent }) {
  *
  * 展示的重点是**「这个数怎么算」**——SQL / 表达式 / 表名按这个优先级取一个，
  * 因为人要判断的正是它对不对。概念名与源是身份，unit 是答里必须带的量纲。 */
+/** 本体自己的一处自相矛盾。**两个按钮而不是三个**——这一档压根没看数据，
+ *  所以没有「数据错了」这条出路，只能是「我去改了本体」或「先放着」。 */
+function DefectRow({
+  defect: d,
+  busy,
+  onDecide,
+}: {
+  defect: OntologyDefect;
+  busy: boolean;
+  onDecide: (resolution: "fixed" | "accepted") => void;
+}) {
+  const what = {
+    symmetric_and_asymmetric: S.review.defectSymAsym,
+    transitive_and_functional: S.review.defectTransFunc,
+    subclass_cycle: S.review.defectCycle,
+    disjoint_with_ancestor: S.review.defectDisjointAncestor,
+    inherits_disjoint: S.review.defectInheritsDisjoint,
+  }[d.kind];
+  // 后两类的后果值得写出来：不可满足的类不会报错，它只是永远空着
+  const unsatisfiable =
+    d.kind === "disjoint_with_ancestor" || d.kind === "inherits_disjoint";
+  return (
+    <div className="glass rounded-xl p-3">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <span className="text-sm text-[var(--u-danger)]">{what}</span>
+        {d.subject_label && (
+          <span className="text-xs text-neutral-300">{d.subject_label}</span>
+        )}
+        {d.other_label && (
+          <span className="text-xs text-neutral-500">↔ {d.other_label}</span>
+        )}
+      </div>
+      {d.path_labels.length > 0 && (
+        <div className="mt-1 text-xs text-neutral-400">
+          {d.path_labels.join(" → ")} → {d.path_labels[0]}
+        </div>
+      )}
+      {unsatisfiable && (
+        <p className="mt-1 text-xs text-neutral-500">
+          {S.review.defectNeverInstantiable}
+        </p>
+      )}
+      <div className="mt-2 flex gap-1.5">
+        <button
+          className="u-btn text-xs"
+          disabled={busy}
+          onClick={() => onDecide("accepted")}
+        >
+          {S.review.defectAccepted}
+        </button>
+        <button
+          className="u-btn u-btn-primary text-xs"
+          disabled={busy}
+          onClick={() => onDecide("fixed")}
+        >
+          {S.review.defectFixed}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 一处公理违规。**三个按钮而不是两个**——第三个是这一档独有的出路：
+ *  矛盾可能出在定义上（用户导的本体把某个属性声明成反对称，而他的语料里
+ *  那关系其实双向），这时该改的是本体，不是二十条事实。 */
+function ViolationRow({
+  violation: v,
+  busy,
+  onDecide,
+}: {
+  violation: AxiomViolation;
+  busy: boolean;
+  onDecide: (
+    resolution: "fact_retracted" | "axiom_relaxed" | "accepted",
+  ) => void;
+}) {
+  const what = {
+    self_loop: S.review.violationSelfLoop,
+    asymmetry: S.review.violationAsymmetry,
+    cycle: S.review.violationCycle,
+    functional: S.review.violationFunctional,
+  }[v.kind];
+  // 自反那一类两条事实是同一条——显示一遍就够，显示两遍像个 bug
+  const single = v.left_fact === v.right_fact;
+  return (
+    <div className="glass rounded-xl p-3">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <span className="text-sm text-[var(--u-warn)]">{what}</span>
+        {v.predicate && (
+          <span className="text-[11px] text-neutral-500">
+            {S.review.violationVia(v.predicate)}
+          </span>
+        )}
+        {v.path_len > 0 && (
+          <span className="text-[11px] text-neutral-500">
+            {S.review.violationPath(v.path_len)}
+          </span>
+        )}
+      </div>
+      <div className="mt-1.5 space-y-1">
+        <div className="text-xs text-neutral-300">{v.left_text}</div>
+        {!single && (
+          <div className="text-xs text-neutral-300">{v.right_text}</div>
+        )}
+      </div>
+      <div className="mt-2 flex gap-1.5 flex-wrap">
+        <button
+          className="u-btn text-xs"
+          disabled={busy}
+          onClick={() => onDecide("accepted")}
+        >
+          {S.review.acceptBoth}
+        </button>
+        <button
+          className="u-btn text-xs"
+          disabled={busy}
+          onClick={() => onDecide("axiom_relaxed")}
+        >
+          {S.review.relaxAxiom}
+        </button>
+        <button
+          className="u-btn u-btn-primary text-xs"
+          disabled={busy}
+          onClick={() => onDecide("fact_retracted")}
+        >
+          {S.review.retractFact}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function MappingRow({
   mapping: m,
   busy,
@@ -500,8 +635,25 @@ type Sel =
   // 语义层的待表态映射（0011）。从前它借「低置信事实」那一档露面——
   // 靠 0.6 的置信度混进去,而它根本不是一条关于世界的断言
   | "mappings"
+  // 公理违规（0002 R0）。**与 conflicts 分开**：那一档问「哪条对」，
+  // 这一档还可能答「公理写错了」——出路不同
+  | "violations"
+  // 本体自己的自相矛盾。**与 violations 分开**：那一档看事实，这一档只看定义
+  | "defects"
   | "decisions"
   | "merges";
+
+/** 走服务端分页的那几档（决策台账另有自己的接口） */
+const QUEUE_FETCHED: ReviewQueue[] = [
+  "duplicates",
+  "conflicts",
+  "unconfirmed",
+  "lowconf",
+  "mappings",
+  "violations",
+  "defects",
+  "merges",
+];
 
 const QUEUE_ORDER: Sel[] = [
   "duplicates",
@@ -509,6 +661,8 @@ const QUEUE_ORDER: Sel[] = [
   "unconfirmed",
   "lowconf",
   "mappings",
+  "violations",
+  "defects",
 ];
 const PAGE_SIZE: Record<Sel, number> = {
   duplicates: DUP_PAGE,
@@ -516,6 +670,8 @@ const PAGE_SIZE: Record<Sel, number> = {
   unconfirmed: FACT_PAGE,
   lowconf: FACT_PAGE,
   mappings: FACT_PAGE,
+  violations: FACT_PAGE,
+  defects: FACT_PAGE,
   merges: MERGE_PAGE,
   decisions: 20,
 };
@@ -570,11 +726,22 @@ export function Review() {
   const [sel, setSel] = useState<Sel | null>(null);
   const [page, setPage] = useState(0);
 
-  // 队列变化经 SSE 事件流推送（useKbEvents 挂在 Shell），无需轮询
+  // 队列变化经 SSE 事件流推送（useKbEvents 挂在 Shell），无需轮询。
+  //
+  // **按分档 + 页码取**：从前一次把八个队列全端回来、每档 100 条、客户端分页，
+  // 于是左栏的徽标是截断后的数字，第十一页之后的东西界面上不存在。现在计数
+  // 每次都回（服务端 COUNT，不受一页多少条影响），内容只回当前这一档的一页。
+  const queueSel: ReviewQueue = QUEUE_FETCHED.includes(
+    (sel ?? "duplicates") as ReviewQueue,
+  )
+    ? ((sel ?? "duplicates") as ReviewQueue)
+    : "duplicates";
   const review = useQuery({
-    queryKey: ["review", kb?.id],
-    queryFn: () => api.review(kb!.id),
+    queryKey: ["review", kb?.id, queueSel, page],
+    queryFn: () => api.review(kb!.id, queueSel, PAGE_SIZE[queueSel], page * PAGE_SIZE[queueSel]),
     enabled: !!kb,
+    // 翻页时别把上一页闪成空白——计数与骨架都还在，只有条目在换
+    placeholderData: (prev) => prev,
   });
   // 决策台账：服务端分页，仅选中时拉取
   const history = useQuery({
@@ -617,6 +784,32 @@ export function Review() {
     }) => api.decideMapping(kb!.id, id, status),
     onSettled: invalidate,
   });
+  const defectAction = useMutation({
+    mutationFn: ({
+      id,
+      resolution,
+    }: {
+      id: string;
+      resolution: "fixed" | "accepted";
+    }) => api.decideDefect(kb!.id, id, resolution),
+    onSettled: invalidate,
+  });
+  const violationAction = useMutation({
+    mutationFn: ({
+      id,
+      resolution,
+    }: {
+      id: string;
+      resolution: "fact_retracted" | "axiom_relaxed" | "accepted";
+    }) => api.decideViolation(kb!.id, id, resolution),
+    onSettled: invalidate,
+  });
+  // 检查是同步的纯计算,所以直接 mutate 不排队。跑完把报告留在按钮旁边——
+  // **零和零不一样**：没有公理时要说「无从判起」,不能说「未发现矛盾」
+  const runCheck = useMutation({
+    mutationFn: () => api.runConsistencyCheck(kb!.id),
+    onSettled: invalidate,
+  });
   const revert = useMutation({
     mutationFn: (mergeId: string) => api.revertMerge(kb!.id, mergeId),
     onSettled: invalidate,
@@ -640,24 +833,38 @@ export function Review() {
     onSettled: invalidate,
   });
 
-  const data = review.data;
+  // **徽标读服务端的 COUNT，不读列表长度。** 这是从前那个「库里 164、界面写
+  // 100」的根源：数组长度反映的是一页多少条，不是库里有多少条。
+  const c = review.data?.counts;
   const counts: Record<Sel, number> = {
-    duplicates: data?.reviews.length ?? 0,
-    conflicts: data?.conflicts?.length ?? 0,
-    unconfirmed: data?.unconfirmed?.length ?? 0,
-    lowconf: data?.facts.length ?? 0,
-    mappings: data?.mappings?.length ?? 0,
-    merges: data?.merges.length ?? 0,
+    duplicates: c?.duplicates ?? 0,
+    conflicts: c?.conflicts ?? 0,
+    unconfirmed: c?.unconfirmed ?? 0,
+    lowconf: c?.lowconf ?? 0,
+    mappings: c?.mappings ?? 0,
+    violations: c?.violations ?? 0,
+    defects: c?.defects ?? 0,
+    merges: c?.merges ?? 0,
     decisions: history.data?.total ?? 0,
   };
+  // 当前这一档的一页。**服务端已经切好了**，这里只按档收窄类型——
+  // 收窄错了会在渲染时露馅，而不是悄悄显示空列表
+  const rows = review.data?.queue === queueSel ? (review.data.items ?? []) : [];
+  const asDuplicates = () => rows as ReviewItem[];
+  const asFacts = () => rows as FactReviewItem[];
+  const asConflicts = () => rows as ConflictItem[];
+  const asMappings = () => rows as ConceptMapping[];
+  const asViolations = () => rows as AxiomViolation[];
+  const asDefects = () => rows as OntologyDefect[];
+  const asMerges = () => rows as MergeLog[];
   const queueEmpty = QUEUE_ORDER.every((k) => counts[k] === 0);
 
   // 首批数据到达：定位到第一个非空队列（全空落在 duplicates 显示"干净"文案）
   useEffect(() => {
-    if (sel === null && data)
+    if (sel === null && c)
       setSel(QUEUE_ORDER.find((k) => counts[k] > 0) ?? "duplicates");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data]);
+  }, [c]);
 
   const select = (s: Sel) => {
     setSel(s);
@@ -679,6 +886,11 @@ export function Review() {
       hint: S.review.lowConfidenceHint,
     },
     mappings: { title: S.review.mappings, hint: S.review.mappingsHint },
+    violations: {
+      title: S.review.violations,
+      hint: S.review.violationsHint,
+    },
+    defects: { title: S.review.defects, hint: S.review.defectsHint },
     decisions: { title: S.review.decisionsTitle, hint: S.review.decisionsHint },
     merges: { title: S.review.mergeHistory, hint: null },
   };
@@ -719,6 +931,18 @@ export function Review() {
             count={counts.mappings}
             onClick={() => select("mappings")}
           />
+          <RailItem
+            active={active === "violations"}
+            label={S.review.railViolations}
+            count={counts.violations}
+            onClick={() => select("violations")}
+          />
+          <RailItem
+            active={active === "defects"}
+            label={S.review.railDefects}
+            count={counts.defects}
+            onClick={() => select("defects")}
+          />
         </div>
         <RailHeader label={S.review.tabHistory} />
         <div className="px-2 space-y-0.5">
@@ -749,7 +973,7 @@ export function Review() {
             </p>
           )}
 
-          {data && (
+          {review.data && (
             <section>
               {/* 页级标题：与 Library/KB Settings 同级（text-lg），不是卡片头 */}
               <h2 className="u-title text-lg mb-1">{SECTION[active].title}</h2>
@@ -759,8 +983,12 @@ export function Review() {
                 </p>
               )}
 
-              {/* 空态：整个待办全清 vs 单类清空 */}
-              {isQueueSel && counts[active] === 0 && (
+              {/* 空态：整个待办全清 vs 单类清空。**公理这一档除外**——它自己那句要
+                  分清「查过、没矛盾」和「还没查过」，通用空态说不出这个差别 */}
+              {isQueueSel &&
+                active !== "violations" &&
+                active !== "defects" &&
+                counts[active] === 0 && (
                 <div className="glass rounded-xl p-10 text-center text-sm text-neutral-500">
                   {queueEmpty ? S.review.empty : S.review.categoryEmpty}
                 </div>
@@ -768,7 +996,7 @@ export function Review() {
 
               {active === "duplicates" && counts.duplicates > 0 && (
                 <div className="space-y-3">
-                  {pageSlice(data.reviews, page, DUP_PAGE).rows.map((item) => (
+                  {asDuplicates().map((item) => (
                     <DuplicateCard
                       key={item.id}
                       item={item}
@@ -785,7 +1013,7 @@ export function Review() {
 
               {active === "conflicts" && counts.conflicts > 0 && (
                 <div className="space-y-3">
-                  {pageSlice(data.conflicts, page, CONFLICT_PAGE).rows.map(
+                  {asConflicts().map(
                     (c) => (
                       <ConflictRow
                         key={c.id}
@@ -805,7 +1033,7 @@ export function Review() {
 
               {active === "unconfirmed" && counts.unconfirmed > 0 && (
                 <div className="space-y-3">
-                  {pageSlice(data.unconfirmed, page, FACT_PAGE).rows.map(
+                  {asFacts().map(
                     (fact) => (
                       <UnconfirmedRow
                         key={fact.id}
@@ -830,7 +1058,7 @@ export function Review() {
 
               {active === "lowconf" && counts.lowconf > 0 && (
                 <div className="space-y-3">
-                  {pageSlice(data.facts, page, FACT_PAGE).rows.map((fact) => (
+                  {asFacts().map((fact) => (
                     <FactRow
                       key={fact.id}
                       fact={fact}
@@ -851,7 +1079,7 @@ export function Review() {
 
               {active === "mappings" && counts.mappings > 0 && (
                 <div className="space-y-3">
-                  {pageSlice(data.mappings ?? [], page, FACT_PAGE).rows.map(
+                  {asMappings().map(
                     (m) => (
                       <MappingRow
                         key={m.id}
@@ -869,6 +1097,83 @@ export function Review() {
                 </div>
               )}
 
+              {active === "defects" && (
+                <div className="space-y-3">
+                  {counts.defects === 0 && (
+                    <div className="glass rounded-xl p-10 text-center text-sm text-neutral-500">
+                      {S.review.categoryEmpty}
+                    </div>
+                  )}
+                  {asDefects().map(
+                    (d) => (
+                      <DefectRow
+                        key={d.id}
+                        defect={d}
+                        busy={
+                          defectAction.isPending &&
+                          defectAction.variables?.id === d.id
+                        }
+                        onDecide={(resolution) =>
+                          defectAction.mutate({ id: d.id, resolution })
+                        }
+                      />
+                    ),
+                  )}
+                </div>
+              )}
+
+              {active === "violations" && (
+                <div className="space-y-3">
+                  {/* 按钮在这一档里，不在页头：只有看这一档的人才想重跑。
+                      报告留在按钮旁边——空结果要说清是「没矛盾」还是「没判据」 */}
+                  <div className="flex items-center gap-3">
+                    <button
+                      className="u-btn u-btn-primary text-xs"
+                      disabled={runCheck.isPending}
+                      onClick={() => runCheck.mutate()}
+                    >
+                      {runCheck.isPending
+                        ? S.review.checking
+                        : S.review.runCheck}
+                    </button>
+                    {runCheck.data && (
+                      <span className="text-xs text-neutral-500">
+                        {/* 三种结果说三句话。**`found` 不是要报的数**：
+                            重跑会把已裁决的那些重新算出来，说「3 处矛盾」而
+                            列表只剩一条，看起来像界面漏了东西 */}
+                        {runCheck.data.predicates_with_axioms === 0
+                          ? S.review.checkNoAxioms
+                          : runCheck.data.inserted > 0
+                            ? S.review.checkFound(runCheck.data.inserted)
+                            : runCheck.data.found > 0
+                              ? S.review.checkNothingNew
+                              : S.review.checkClean(runCheck.data.edges)}
+                      </span>
+                    )}
+                  </div>
+                  {counts.violations === 0 && !runCheck.data && (
+                    <div className="glass rounded-xl p-10 text-center text-sm text-neutral-500">
+                      {S.review.checkNeverRun}
+                    </div>
+                  )}
+                  {asViolations().map(
+                    (v) => (
+                      <ViolationRow
+                        key={v.id}
+                        violation={v}
+                        busy={
+                          violationAction.isPending &&
+                          violationAction.variables?.id === v.id
+                        }
+                        onDecide={(resolution) =>
+                          violationAction.mutate({ id: v.id, resolution })
+                        }
+                      />
+                    ),
+                  )}
+                </div>
+              )}
+
               {active === "merges" &&
                 (counts.merges === 0 ? (
                   <div className="glass rounded-xl p-10 text-center text-sm text-neutral-500">
@@ -876,7 +1181,7 @@ export function Review() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {pageSlice(data.merges, page, MERGE_PAGE).rows.map((m) => (
+                    {asMerges().map((m) => (
                       <MergeRow
                         key={m.id}
                         merge={m}

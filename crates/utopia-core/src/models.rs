@@ -307,6 +307,9 @@ pub struct EntityTypeView {
     pub parents: Vec<Uuid>,
     /// 左栏画树时挂在哪一支下。不参与语义，只管展示
     pub primary_parent: Option<Uuid>,
+    /// 与这个类互斥的类：**声明「不可能同时是」**。一致性检查据此报出
+    /// 不可满足的类——一个类继承了两个互斥的祖先，就永远不可能有实例（0002）
+    pub disjoint: Vec<Uuid>,
     pub description: String,
     pub usage: i64,
 }
@@ -319,6 +322,12 @@ pub struct RelationTypeView {
     pub temporal: String,
     pub functional: bool,
     pub inverse_functional: bool,
+    /// 其余四条 OWL 公理。**推理机的判据全在这里**（0002）——它们从前只能
+    /// 靠导入 OWL 带进来，在界面上建本体的人永远开不了那台机器
+    pub is_transitive: bool,
+    pub is_symmetric: bool,
+    pub is_asymmetric: bool,
+    pub is_irreflexive: bool,
     pub builtin: bool,
     pub description: String,
     /// relation（宾语是实体）| attribute（宾语是字面值）
@@ -476,6 +485,11 @@ pub struct GraphEdge {
     pub label: Option<String>,
     /// true = 这条边的名字来自原文，不是本体认下的关系。界面要显示得看得出区别
     pub inferred: bool,
+    /// true = 这条边是**推出来的**，不是任何人断言的（R1，住在 `derived_facts`）。
+    ///
+    /// **与 `inferred` 不是一回事**，尽管两个词很近：那一位说的是「名字来自原文
+    /// 而不是本体」，这一位说的是「这条边根本不是谁说的，是引擎推的」
+    pub derived: bool,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
     pub confidence: f32,
@@ -714,6 +728,14 @@ pub struct KnowledgeBase {
     /// 内置本体按哪种语言播种，以及新的类/关系描述写成哪种语言（`en` | `zh`）。
     /// **跟语料走，不跟界面走**——description 的读者是正在读这些文档的模型。
     /// 见 docs/decisions/0004。
+    /// 是否把推出来的事实写进账本（R1）。**缺省关**——这一步往图里加东西，
+    /// 而 0001 判据 2 说「本体是引导不是执法」：声明可能是错的，不该在用户
+    /// 没表态时就按它改图
+    pub materialize_inferences: bool,
+    /// 多久重推一次（分钟）。见 `knowledge_bases.inference_interval_minutes`
+    pub inference_interval_minutes: i32,
+    /// 上次推完的时间。**答的是「上次看过没有」，不是「上次改过没有」**
+    pub last_inference_at: Option<DateTime<Utc>>,
     pub ontology_lang: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -804,4 +826,117 @@ pub struct ConceptMapping {
     /// **状态而不是置信度。** 从前借事实的 confidence 表达「提议 0.6 / 确认 1.0」，
     /// 那是把二值状态编码成浮点数，还顺带让它落进「低置信事实」那一档
     pub status: String,
+}
+
+/// 一处公理违规，配好展示所需的三元组文本（见 `axiom_violations`）。
+///
+/// **两条事实都展开成 主-谓-宾 文本**：Review 页要让人一眼看出矛盾在哪，
+/// 而两个 UUID 看不出任何东西。自反那一类两条相同——它就是一条事实。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AxiomViolation {
+    pub id: Uuid,
+    /// self_loop | asymmetry | cycle | functional
+    pub kind: String,
+    /// 判据来自哪条关系。人若判「公理写错了」，从这里进本体去改
+    pub predicate: Option<String>,
+    pub left_fact: Uuid,
+    pub left_text: String,
+    pub right_fact: Uuid,
+    pub right_text: String,
+    /// 环的长度（含首尾）。其余三类为 0——前端据此决定要不要显示「查看路径」
+    pub path_len: i32,
+    pub detected_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 本体自己的一处自相矛盾（见 `ontology_defects`）。
+///
+/// **与 [`AxiomViolation`] 不是一回事**：那个说「事实与定义抵触」，这个说
+/// 「定义自己站不住」。后者更根本——一个自相矛盾的本体会让前者的结论全部可疑。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct OntologyDefect {
+    pub id: Uuid,
+    /// symmetric_and_asymmetric | transitive_and_functional | subclass_cycle
+    /// | disjoint_with_ancestor | inherits_disjoint
+    pub kind: String,
+    /// 出问题那个对象的标签（类或谓词）。查不到就是它已经被删了
+    pub subject_label: Option<String>,
+    /// 另一方：互斥的那个类
+    pub other_label: Option<String>,
+    /// 环上类的标签，按顺序
+    pub path_labels: Vec<String>,
+    pub detected_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 一条推出来的事实，连同它的证明（实体面板的「推出来的」那一档）。
+///
+/// **`premises` 是这一档存在的理由**：不给出前提的话，一条派生边跟一条普通的边
+/// 在界面上看不出区别，而那正是「推理污染知识」的样子。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct DerivedFactView {
+    pub id: Uuid,
+    pub subject_id: Uuid,
+    pub subject: String,
+    pub object_id: Uuid,
+    pub object: String,
+    pub predicate: String,
+    /// transitive | symmetric——靠哪条规则推的
+    pub rule: String,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+    pub confidence: f32,
+    pub derived_at: DateTime<Utc>,
+    /// 直接前提，按推导顺序展开成三元组文本
+    pub premises: Vec<String>,
+}
+
+/// 审核队列各档的**真实条数**。
+///
+/// 与列表分开取是有意的：列表有上限（一页十条），数数没有。从前左栏读的是
+/// 数组长度，而接口固定只回 100 条——一个有 164 条待办的库，界面写着 100，
+/// 清完还会再冒出来。
+#[derive(Debug, Clone, Copy, Default, Serialize, sqlx::FromRow)]
+pub struct ReviewCounts {
+    pub duplicates: i64,
+    pub conflicts: i64,
+    pub unconfirmed: i64,
+    pub lowconf: i64,
+    pub mappings: i64,
+    pub violations: i64,
+    pub defects: i64,
+    pub merges: i64,
+}
+
+/// 一个关系声明了哪些 OWL 公理。
+///
+/// **六位打包成一个东西传，不是六个参数。** 它们本来就是同一族——推理机
+/// （0002）拿它们当判据，界面上也该并排出现；散成参数表里的六个 bool，
+/// 调用点迟早传错顺序，而 `bool` 之间编译器帮不上忙。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationAxioms {
+    /// 主语侧唯一（一个人一个出生地）
+    pub functional: bool,
+    /// 宾语侧唯一（一个项目一个 leader）
+    pub inverse_functional: bool,
+    /// A→B ∧ B→C ⟹ A→C
+    pub transitive: bool,
+    /// A→B ⟹ B→A
+    pub symmetric: bool,
+    /// A→B ⟹ 不存在 B→A
+    pub asymmetric: bool,
+    /// 不存在 A→A
+    pub irreflexive: bool,
+}
+
+/// 文库的一页，连同这一页之外的统计。
+///
+/// **统计不受名字/状态筛选影响**：`ready` / `extracting` / `failed` 说的是这个
+/// 来源里有多少，那是批量按钮的作用范围，跟你此刻在搜什么无关。
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentPage {
+    pub docs: Vec<Document>,
+    /// 命中筛选的总数（分页器用它）
+    pub total: i64,
+    pub ready: i64,
+    pub extracting: i64,
+    pub failed: i64,
 }
