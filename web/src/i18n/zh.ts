@@ -144,6 +144,14 @@ export const zh: Strings = {
     unknownKind: (kind: string) => kind,
   },
 
+  kbScope: {
+    deniedTitle: "你没有这个知识库的权限",
+    deniedBody:
+      "链接指向的库你打不开。找分享给你的人开通权限，或者回到自己的库。",
+    missingTitle: "这个知识库不在了",
+    missingBody: "它已被删除，或者链接抄错了。下面是你自己的库。",
+    myKbs: "我的知识库",
+  },
   nav: {
     workspaceLabel: "工作区",
     kbLabel: "知识库",
@@ -512,6 +520,15 @@ export const zh: Strings = {
   },
   graph: {
     untyped: "未分类",
+    legendMore: (n: number) => `全部 ${n} 个类`,
+    nodeBudget: "画多少个实体",
+    nodeBudgetMore: "多画一些",
+    nodeBudgetLess: "少画一些",
+    legendSearch: "筛选类",
+    legendNone: "没有匹配的类",
+    legendOnly: "只看",
+    legendShowAll: (n: number) => `显示全部（隐藏了 ${n} 个）`,
+    legendAllHint: "画面上的全部类，按出现次数排。点一下显示或隐藏。",
     searchMore: (n: number) => `还有 ${n} 个——再加载 20`,
     zoomIn: "放大",
     zoomOut: "缩小",
@@ -566,6 +583,9 @@ export const zh: Strings = {
       "没有人断言过的边——引擎按本体声明的公理推出来的。每一条都附着它用到的前提。",
     derivedNoProof: "前提已经不在了。",
     derivedPanel: "推理",
+    derivedRunAsk: "对整个库重跑一遍推理？",
+    derivedRunGo: "跑",
+    derivedRunCancel: "取消",
     derivedCountLabel: "推出来的边",
     derivedStateLabel: "定时",
     derivedLastLabel: "上次推理",
@@ -610,13 +630,24 @@ export const zh: Strings = {
       "被取代的那条断言仍留在台账里。",
     ongoing: "至今",
     endedUnknown: "已结束（时间不详）",
-    stats: (n: number, e: number, active: number) =>
-      `${n} 个实体 · ${e} 条事实 · ${active} 条现行`,
-    statsCapped: (shown: number, total: number, e: number, active: number) =>
-      `已画 ${shown} / 共 ${total} 个实体 · ${e} 条事实 · ${active} 条现行`,
+    stats: (n: number, e: number, active: number | null) =>
+      `${n} 个实体 · ${e} 条事实${active === null ? "" : ` · ${active} 条现行`}`,
+    statsCapped: (
+      shown: number,
+      total: number,
+      shownE: number,
+      totalE: number,
+      active: number | null,
+    ) =>
+      `已画 ${shown} / 共 ${total} 个实体 · ${shownE} / 共 ${totalE} 条事实${active === null ? "" : ` · ${active} 条现行`}`,
     cappedHint: (shown: number, total: number) =>
       `画布只画连接最密的 ${shown} 个，库里共 ${total} 个。其余的用搜索找。`,
     stabilizing: "布局收敛中",
+    scrubUnitHint: "播放的步长，也是每根柱子的跨度",
+    scrubUnitYear: "年",
+    scrubUnitMonth: "月",
+    scrubUnitDay: "日",
+    scrubBarMerged: (n: number) => `每根柱子含 ${n} 步`,
     allTime: "全部时间",
     nowBtn: "现在",
     play: "播放时间线",

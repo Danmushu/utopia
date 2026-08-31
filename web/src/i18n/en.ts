@@ -163,6 +163,15 @@ export const en = {
     unknownKind: (kind: string) => kind,
   },
 
+  kbScope: {
+    deniedTitle: "You don't have access to this knowledge base",
+    deniedBody:
+      "The link points at a base you can't open. Ask whoever shared it to grant you access, or pick one of your own.",
+    missingTitle: "This knowledge base is gone",
+    missingBody:
+      "It was deleted, or the link was mistyped. Your own bases are listed below.",
+    myKbs: "My knowledge bases",
+  },
   nav: {
     workspaceLabel: "Workspace",
     kbLabel: "Knowledge base",
@@ -547,6 +556,16 @@ export const en = {
   graph: {
     // 还没判出类型的实体（0009）。不是一个类，是"这一格还空着"
     untyped: "Untyped",
+    legendMore: (n: number) => `All ${n} classes`,
+    nodeBudget: "How many entities to draw",
+    nodeBudgetMore: "Draw more",
+    nodeBudgetLess: "Draw fewer",
+    legendSearch: "Filter classes",
+    legendNone: "No class matches",
+    legendOnly: "Only",
+    legendShowAll: (n: number) => `Show all (${n} hidden)`,
+    legendAllHint:
+      "Every class on screen, most common first. Click to show or hide.",
     searchMore: (n: number) => `${n} more — load 20`,
     zoomIn: "Zoom in",
     zoomOut: "Zoom out",
@@ -615,6 +634,9 @@ export const en = {
       "Edges no one asserted — the engine worked them out from axioms your ontology declares. Each one shows the premises it came from.",
     derivedNoProof: "The premises are gone.",
     derivedPanel: "Inference",
+    derivedRunAsk: "Re-run inference for the whole base?",
+    derivedRunGo: "Run",
+    derivedRunCancel: "Cancel",
     derivedCountLabel: "Edges derived",
     derivedStateLabel: "Schedule",
     derivedLastLabel: "Last run",
@@ -665,15 +687,26 @@ export const en = {
     /* 必须跟 ongoing 看得出区别：混淆这两个正是迁移 0046 要修的东西——
        原文说 "former CEO"，界面却显示 now */
     endedUnknown: "ended, date unknown",
-    stats: (n: number, e: number, active: number) =>
-      `${n} entities · ${e} facts · ${active} active`,
+    stats: (n: number, e: number, active: number | null) =>
+      `${n} entities · ${e} facts${active === null ? "" : ` · ${active} active`}`,
     /** 画布只画度数最高的一批。**说清楚画了多少、共多少**——从前这里写的是
      *  上限，一个上万实体的库右上角永远是 150 */
-    statsCapped: (shown: number, total: number, e: number, active: number) =>
-      `showing ${shown} of ${total} entities · ${e} facts · ${active} active`,
+    statsCapped: (
+      shown: number,
+      total: number,
+      shownE: number,
+      totalE: number,
+      active: number | null,
+    ) =>
+      `showing ${shown} of ${total} entities · ${shownE} of ${totalE} facts${active === null ? "" : ` · ${active} active`}`,
     cappedHint: (shown: number, total: number) =>
       `The canvas draws the ${shown} best-connected entities of ${total}. Search to reach the rest.`,
     stabilizing: "Stabilizing layout",
+    scrubUnitHint: "Step size for playback and for each bar",
+    scrubUnitYear: "Yr",
+    scrubUnitMonth: "Mo",
+    scrubUnitDay: "Dy",
+    scrubBarMerged: (n: number) => `each bar covers ${n} steps`,
     allTime: "All time",
     nowBtn: "Now",
     play: "Play timeline",
