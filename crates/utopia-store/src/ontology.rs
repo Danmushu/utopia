@@ -604,7 +604,7 @@ pub async fn record_miss(
         // 重新顶成一个待处理信号"。那个理由针对的是**呈现**，用的手段却是
         // **停止计数**——两件事被绑在一起了，代价是一次点击变成永久失明：
         // 第一篇里出现一次的说法被忽略掉，后面二十篇都在用它，计数仍停在 1，
-        // 谁也不知道当初那个判断已经不成立，那批事实永远留在兜底谓词上。
+        // 谁也不知道当初那个判断已经不成立，那批事实永远没有谓词。
         //
         // 用户是对**当时看得见的证据**做的判断，不是对所有时间。所以计数照记，
         // 抑制交给读取侧：`list_misses` 仍然只返回未忽略的，提案与自动扩本体
@@ -1766,6 +1766,41 @@ pub async fn entity_fits_domain(
     .fetch_one(pool)
     .await?;
     Ok((declared > 0).then_some(ok > 0))
+}
+
+/// 一条 (主语, 谓词, 宾语) 对着谓词的 domain 签名该怎么落。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// 谓词没声明 domain——没有判据，照原样落
+    Unchecked,
+    /// 主语符合
+    Keep,
+    /// 主语不符合、宾语符合：按签名对调主宾
+    Swap,
+    /// 两边都不符合：这个关系不适用于这对实体，谓词该留空
+    Neither,
+}
+
+/// **三条写谓词的路共用的那一道判断**（#190 / #196）：抽取落新事实、采纳把谓词
+/// 挂回旧事实、合并换掉主语——从前只有抽取查，另外两条各自绕了过去。
+///
+/// 判据刻意窄（0012）：只看 domain，只在**主语违反且宾语符合**时对调，两边都对不上
+/// 就留空谓词。参数顺序不是关于世界的断言，是这个 key 的编码约定，所以本体在这一处
+/// 是执法的；哪些类型能参与仍是引导，不在这里裁。
+pub async fn judge_direction(
+    pool: &PgPool,
+    relation_type_id: Uuid,
+    subject_id: Uuid,
+    object_id: Uuid,
+) -> AppResult<Fit> {
+    match entity_fits_domain(pool, relation_type_id, subject_id).await? {
+        None => Ok(Fit::Unchecked),
+        Some(true) => Ok(Fit::Keep),
+        Some(false) => match entity_fits_domain(pool, relation_type_id, object_id).await? {
+            Some(true) => Ok(Fit::Swap),
+            _ => Ok(Fit::Neither),
+        },
+    }
 }
 
 /// 把 `owl:inverseOf` / `rdfs:subPropertyOf` 从 IRI 解析成 id。

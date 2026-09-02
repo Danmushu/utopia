@@ -14,6 +14,8 @@ mod jira_issues;
 mod live;
 mod llm_util;
 mod mappings;
+mod notion;
+mod object_storage;
 mod ontology_index;
 mod ontology_packs;
 mod owl_import;
@@ -24,6 +26,7 @@ mod query_engine;
 mod retrieval;
 mod state;
 mod type_resolution;
+mod webdav;
 
 use state::AppState;
 use std::sync::Arc;
@@ -31,6 +34,14 @@ use tracing_subscriber::EnvFilter;
 use utopia_core::config::AppConfig;
 use utopia_search::SearchIndex;
 use uuid::Uuid;
+
+/// 记忆那条路带着「谁说的」（0015）；别的任务没有这个字段，读到 None 本就该如此
+fn payload_proposed_by(payload: &serde_json::Value) -> Option<Uuid> {
+    payload
+        .get("proposed_by")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+}
 
 fn payload_document_id(payload: &serde_json::Value) -> anyhow::Result<Uuid> {
     payload
@@ -120,7 +131,15 @@ async fn main() -> anyhow::Result<()> {
             async move {
                 // 任务失败时看一眼是不是模型端点连不上——那是系统级故障，
                 // 而现在它只会留在 jobs.last_error 里，没有任何界面看得到
-                let result = dispatch(&st, &job).await;
+                //
+                // 没救的失败在这里挂上标记，队列据此不再退避重试（#195）：
+                // 判据在这一侧，因为 `utopia-store` 看不见 LLM 的错误类型
+                let result = dispatch(&st, &job)
+                    .await
+                    .map_err(|e| match alerting::hopeless(&e) {
+                        true => e.context(utopia_core::Terminal),
+                        false => e,
+                    });
                 if let Err(e) = &result {
                     alerting::observe_job_failure(&st, &job, e).await;
                 }
@@ -294,7 +313,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
         }
         "memory_ingest" => {
             let id = payload_document_id(&job.payload)?;
-            pipeline::memory_ingest(st, id).await
+            pipeline::memory_ingest(st, id, payload_proposed_by(&job.payload)).await
         }
         "explore_mappings" => {
             let kb_id: Uuid = job
@@ -341,7 +360,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
         }
         "extract_document" => {
             let id = payload_document_id(&job.payload)?;
-            extraction::extract_document(st, id).await
+            extraction::extract_document(st, id, payload_proposed_by(&job.payload)).await
         }
         "bootstrap_ontology" => {
             let kb_id: Uuid = job

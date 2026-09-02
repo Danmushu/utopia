@@ -1,5 +1,6 @@
 //! 来源同步任务：url（网页抓取）/ rss（订阅，pubDate → doc_time）/
-//! github_issues / jira_issues（工单，更新时刻 → doc_time，正文里带状态变更史）。
+//! github_issues / jira_issues（工单，更新时刻 → doc_time，正文里带状态变更史）/
+//! s3（对象存储，LastModified → doc_time）。
 //! 全部走 sha256 去重（重复内容静默跳过），新文档进标准摄入管道（process_document）。
 //! folder 是纯容器（上传入内），api 是推送型——两者无拉取语义。
 
@@ -53,6 +54,9 @@ pub async fn sync_source(state: &AppState, source_id: Uuid) -> anyhow::Result<()
         "custom" => sync_custom(state, &source).await,
         "github_issues" => sync_github_issues(state, &source).await,
         "jira_issues" => sync_jira_issues(state, &source).await,
+        "s3" | "azure_blob" | "gcs" => sync_object_storage(state, &source).await,
+        "webdav" => sync_webdav(state, &source).await,
+        "notion" => sync_notion(state, &source).await,
         // folder / api 无拉取语义
         _ => Ok(SyncStats::default()),
     };
@@ -742,6 +746,146 @@ async fn sync_custom(state: &AppState, source: &Source) -> anyhow::Result<SyncSt
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         tracing::info!(source_id = %source.id, count = n, "custom 墓碑：标记不在来源中");
+    }
+    Ok(stats)
+}
+
+/// 对象存储同步：列前缀下的对象，逐个摄入。
+///
+/// `external_key` 用 `s3://bucket/key`，跟 `file:///` 与页面 URL 同一个约定：
+/// 出处自描述。换了前缀但内容没变时，`ingest_item` 会认成「搬家」而不是新增，
+/// 不会重跑一遍抽取。
+///
+/// **`doc_time` 取 `LastModified`，而它是写入时刻不是文档自身的时间。**
+/// 一份 2019 年的合同今天传上去，时间线上会落在今天。对象存储没有更好的
+/// 来源——除非文件名或正文里带日期，而那是抽取器的活。这一条与 `url` 源
+/// 同病：`0013` 的第一条判据在这里只满足一半。
+async fn sync_object_storage(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
+    let bucket = source.config["bucket"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{} source is missing config.bucket", source.kind))?;
+    let prefix = source.config["prefix"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let store = crate::object_storage::client(&source.kind, &source.config)?;
+    let (objects, truncated) =
+        crate::object_storage::fetch(&source.kind, store.as_ref(), bucket, prefix).await?;
+
+    // 到顶不是错误，但必须说出来——否则「同步成功」下面藏着没进来的东西，
+    // 而那正是 0005 说的失败无声
+    if truncated {
+        tracing::warn!(
+            %bucket, prefix = prefix.unwrap_or(""),
+            "对象数到达单次上限，其余留给下一次同步"
+        );
+    }
+
+    let mut stats = SyncStats::default();
+    for obj in objects {
+        // **不猜 mime。** `utopia_ingest::parse` 先看魔数、再看扩展名，
+        // 注释写着「扩展名可能撒谎」——在这里按文件名猜一个，只是多一个
+        // 会撒谎的来源，而且要为此多一个依赖。`octet-stream` 是诚实的：
+        // 我们拿到的就是一串字节，没看过里面是什么。
+        let action = ingest_item(
+            state,
+            source.kb_id,
+            source.id,
+            &obj.external_key,
+            &obj.filename,
+            "application/octet-stream",
+            &obj.bytes,
+            obj.last_modified,
+        )
+        .await?;
+        stats.absorb(action);
+    }
+    Ok(stats)
+}
+
+/// WebDAV 同步：逐层走目录，把文件摄进来。
+///
+/// `external_key` 用 `webdav://host/path`——同一台网盘换了挂载点仍是同一份
+/// 文件，而不同网盘上的同名路径是两份。
+async fn sync_webdav(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
+    let base = source.config["base_url"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("webdav source is missing config.base_url"))?;
+    let root = source.config["path"].as_str().map(str::trim).unwrap_or("/");
+    let user = source.config["username"].as_str().map(str::trim);
+    let pass = source.config["password"].as_str().map(str::trim);
+    let auth = match (user, pass) {
+        (Some(u), Some(p)) if !u.is_empty() => Some((u, p)),
+        _ => None,
+    };
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let (files, truncated) = crate::webdav::fetch(&http, base, root, auth).await?;
+    if truncated {
+        tracing::warn!(base, root, "文件数到达单次上限，其余留给下一次同步");
+    }
+
+    let mut stats = SyncStats::default();
+    for f in files {
+        // 不猜 mime，理由同对象存储：解析先看魔数
+        let action = ingest_item(
+            state,
+            source.kb_id,
+            source.id,
+            &f.external_key,
+            &f.filename,
+            "application/octet-stream",
+            &f.bytes,
+            f.last_modified,
+        )
+        .await?;
+        stats.absorb(action);
+    }
+    Ok(stats)
+}
+
+/// Notion 同步：把 integration 能看见的页面摄进来。
+///
+/// `doc_time` 取 `last_edited_time`——**这是页面自己的编辑时刻**，比对象存储
+/// 那边的写入时刻实在：一份 2019 年的合同今天传进 S3 会落在今天，而 Notion
+/// 页面的编辑时刻就是它内容变化的时刻。
+async fn sync_notion(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
+    let token = source.config["token"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("notion source is missing config.token"))?;
+    let query = source.config["query"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let (pages, truncated) = crate::notion::fetch(token, query).await?;
+    if truncated {
+        tracing::warn!("页面数到达单次上限，其余留给下一次同步");
+    }
+
+    let mut stats = SyncStats::default();
+    for p in pages {
+        let action = ingest_item(
+            state,
+            source.kb_id,
+            source.id,
+            &p.external_key,
+            &p.filename,
+            "text/markdown",
+            p.text.as_bytes(),
+            p.last_edited,
+        )
+        .await?;
+        stats.absorb(action);
     }
     Ok(stats)
 }

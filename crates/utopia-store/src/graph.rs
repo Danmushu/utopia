@@ -1119,7 +1119,7 @@ pub async fn proposed_predicates(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Pr
     Ok(sqlx::query_as(
         // **普遍程度从全量证据里数，不从积压里数。**
         //
-        // 下面那些 WHERE 把行集收窄到「还挂在兜底谓词上、还活着、宾语是实体」
+        // 下面那些 WHERE 把行集收窄到「还没有谓词、还活着、宾语是实体」
         // ——那是**采纳要改写的东西**，`fact_count` 该这么数。但 `doc_count`
         // 回答的是另一个问题：这个说法在语料里有多普遍。拿残渣去数它会系统性
         // 偏低，而且越用越低——说法一旦被采纳、被谓词匹配接住、或被修正作废，
@@ -1231,8 +1231,27 @@ pub async fn adopt_proposed_predicates(
     predicate_id: Uuid,
     forms: &[String],
     swap: bool,
-) -> AppResult<(Uuid, u32)> {
+) -> AppResult<Adopted> {
     adopt(pool, kb_id, predicate_id, AdoptTargets::ByForm(forms), swap).await
+}
+
+/// 一次采纳的账。`left_off` 必须往上传：改写了 20 条、留下 3 条，只报前半句是报喜不报忧。
+#[derive(Debug, Clone, Copy)]
+pub struct Adopted {
+    pub batch_id: Uuid,
+    /// 改写过去的条数
+    pub moved: u32,
+    /// 签名两边都对不上、**没有**挂上谓词的条数（#190）。它们照旧留在空谓词上，
+    /// 原文说法还在证据里——与抽取遇到同样情形的处置一致
+    pub left_off: u32,
+    /// 按签名对调了主宾的条数。
+    ///
+    /// **掰正不该静默。** 抽取那条路每掰一次就落一条 `direction_corrected`
+    /// 丢弃信号（#138 的原话是「绝不静默」：用可能错的声明驱动的自动动作，
+    /// 留痕才不属于 0001 判据 2 反对的那一类）。采纳走的是同一道判断，
+    /// 也该说出来自己动了几条，否则台账上只剩「改写了 N 条」，看不出其中
+    /// 有几条是被本体掉了个头的
+    pub corrected: u32,
 }
 
 /// 要改写哪些事实，以及新行的宾语从哪来。
@@ -1243,8 +1262,8 @@ pub enum AdoptTargets<'a> {
     ///
     /// **归一化必须在调用方做**：那套规则（"2015" → 日期、"1,200" → 数字）
     /// 住在抽取模块，store 够不着也不该够得着。更要紧的是它会**失败**——
-    /// 一个换算不出来的值不该硬塞进一个日期属性里，那条事实宁可继续挂在
-    /// 兜底谓词上。所以由调用方筛完再交回来。
+    /// 一个换算不出来的值不该硬塞进一个日期属性里，那条事实宁可继续没有
+    /// 谓词（原词还在证据里）。所以由调用方筛完再交回来。
     WithValues(&'a [(Uuid, serde_json::Value)]),
 }
 
@@ -1254,12 +1273,18 @@ async fn adopt(
     predicate_id: Uuid,
     targets: AdoptTargets<'_>,
     swap: bool,
-) -> AppResult<(Uuid, u32)> {
+) -> AppResult<Adopted> {
     let batch_id = Uuid::now_v7();
+    let nothing = Adopted {
+        batch_id,
+        moved: 0,
+        left_off: 0,
+        corrected: 0,
+    };
     let targets: Vec<(Uuid, Uuid, Option<Uuid>, Option<serde_json::Value>)> = match targets {
         AdoptTargets::ByForm(forms) => {
             if forms.is_empty() {
-                return Ok((batch_id, 0));
+                return Ok(nothing);
             }
             sqlx::query_as(
                 "SELECT f.id, f.subject_id, f.object_id, f.object_value
@@ -1283,7 +1308,7 @@ async fn adopt(
         }
         AdoptTargets::WithValues(items) => {
             if items.is_empty() {
-                return Ok((batch_id, 0));
+                return Ok(nothing);
             }
             // 主语要从库里读回来（调用方给的是 fact_id 与新值），顺带确认这些
             // 事实还活着——挑选与采纳之间可能隔着一次重抽
@@ -1307,12 +1332,37 @@ async fn adopt(
     };
 
     let mut moved = 0u32;
+    let mut left_off = 0u32;
+    let mut corrected = 0u32;
     for (old_id, subject_id, object_id, object_value) in targets {
         // 被动形改写：主宾对调。字面值宾语的事实换不了（值不能当主语），
         // 而 ByForm 那条查询本来就只取 object_id 非空的，所以这里只可能是实体宾语
         let (subject_id, object_id) = match (swap, object_id) {
             (true, Some(o)) => (o, Some(subject_id)),
             _ => (subject_id, object_id),
+        };
+        // **挂谓词之前过一遍签名**（#190）。抽取写入时按 domain 掰正方向或留空，
+        // 而采纳是第二条写谓词的路——从前直接把谓词挂回去，实测把违反率从 0 抬到
+        // 12.3%，全在包关系上。同一道判断（`ontology::judge_direction`），同样三种
+        // 结果：合就挂，主语不合宾语合就对调着挂，都不合就**不挂**——那条事实留在
+        // 空谓词上，原文说法还在证据里，与抽取遇到同样情形的处置一致
+        let (subject_id, object_id) = match object_id {
+            Some(o) => {
+                match crate::ontology::judge_direction(pool, predicate_id, subject_id, o).await? {
+                    crate::ontology::Fit::Swap => {
+                        corrected += 1;
+                        (o, Some(subject_id))
+                    }
+                    crate::ontology::Fit::Neither => {
+                        left_off += 1;
+                        continue;
+                    }
+                    crate::ontology::Fit::Keep | crate::ontology::Fit::Unchecked => {
+                        (subject_id, Some(o))
+                    }
+                }
+            }
+            None => (subject_id, None),
         };
         let mut tx = pool.begin().await?;
         // 目标断言可能已存在（同主宾已有一条真关系）：那就并进去，别造重复。
@@ -1403,7 +1453,12 @@ async fn adopt(
         tx.commit().await?;
         moved += 1;
     }
-    Ok((batch_id, moved))
+    Ok(Adopted {
+        batch_id,
+        moved,
+        left_off,
+        corrected,
+    })
 }
 
 /// 撤销一次采纳：新写的行作废、旧行复活。
@@ -1457,7 +1512,7 @@ pub async fn unadopt(pool: &PgPool, kb_id: Uuid, batch_id: Uuid) -> AppResult<u3
     Ok(reverted)
 }
 
-/// 词表外的**字面值**说法：还挂在兜底谓词上、宾语是值而不是实体的那些。
+/// 词表外的**字面值**说法：还没有谓词、宾语是值而不是实体的那些。
 ///
 /// 跟 [`proposed_predicates`] 互补，两边用 `object_id` 是否为空严格分开。
 /// 混在一起提案就会把 `founding_date` 提成一条关系，而那正是这条路要修掉的。
@@ -1551,7 +1606,7 @@ pub async fn adopt_value_facts(
     kb_id: Uuid,
     attribute_id: Uuid,
     rewrites: &[(Uuid, serde_json::Value)],
-) -> AppResult<(Uuid, u32)> {
+) -> AppResult<Adopted> {
     // 属性那一路没有对调可言：宾语是字面值，值不能当主语
     adopt(
         pool,

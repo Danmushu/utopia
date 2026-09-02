@@ -1,4 +1,4 @@
-//! 实体消解 v2：同名≠同人（设计见 DESIGN.md §4 实体消解 v2）。
+//! 实体消解 v2：同名≠同人（流程图与三次实测修洞见 `docs/pipeline.md` 第二节）。
 //!
 //! 漏斗：名字候选召回（免费，含泛用后缀词干互推）→ 画像向量相似度分层（毫秒，复用摄入阶段的 chunk embedding）
 //! → 灰区新建实体 + 疑似重复审核项（宁分勿合），LLM 攒批裁决在独立后台任务里跑，
@@ -1308,6 +1308,21 @@ pub async fn merge_entities(
         .chain(moved_object.iter())
         .copied()
         .collect();
+
+    // **合并是第三条改写事实的路**（#196）：换掉主语或宾语，就可能把一条合法事实
+    // 变成签名违规——抽取写入时掰正过的方向，合并一次就能再反回去。这里不掰、不改，
+    // 只报：对搬动过的事实查一遍 domain / range，违反的进 `axiom_violations`
+    //（kind = signature），与其它公理违规同一个队列、同样三个出路。
+    // 放在事务之后：目标实体的类型在事务里刚调和过，提交了才看得见
+    match crate::reasoning::signature_breaks(pool, kb_id, Some(&moved_all)).await {
+        Ok(broken) if !broken.is_empty() => {
+            if let Err(e) = crate::reasoning::record_signature_breaks(pool, kb_id, &broken).await {
+                tracing::warn!(%kb_id, error = %e, "合并后的签名违规没能入库");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(%kb_id, error = %e, "合并后的签名检查失败"),
+    }
     let report = crate::temporal::reconcile_moved_facts(pool, kb_id, &moved_all).await?;
     if !report.corrected.is_empty() {
         sqlx::query("UPDATE entity_merges SET temporal_corrections = $2 WHERE id = $1")

@@ -1270,6 +1270,11 @@ function SourceModal({
     | "api"
     | "github_issues"
     | "jira_issues"
+    | "s3"
+    | "azure_blob"
+    | "gcs"
+    | "webdav"
+    | "notion"
   >("folder");
   const [name, setName] = useState("");
   const [icon, setIcon] = useState<string | null>(null);
@@ -1280,6 +1285,21 @@ function SourceModal({
   const [repo, setRepo] = useState("");
   const [jiraUrl, setJiraUrl] = useState("");
   const [jiraProject, setJiraProject] = useState("");
+  const [s3Bucket, setS3Bucket] = useState("");
+  const [s3Prefix, setS3Prefix] = useState("");
+  const [s3Endpoint, setS3Endpoint] = useState("");
+  const [s3Region, setS3Region] = useState("");
+  const [s3Key, setS3Key] = useState("");
+  const [s3Secret, setS3Secret] = useState("");
+  const [azAccount, setAzAccount] = useState("");
+  const [azKey, setAzKey] = useState("");
+  const [gcsKey, setGcsKey] = useState("");
+  const [davUrl, setDavUrl] = useState("");
+  const [davPath, setDavPath] = useState("");
+  const [davUser, setDavUser] = useState("");
+  const [davPass, setDavPass] = useState("");
+  const [notionToken, setNotionToken] = useState("");
+  const [notionQuery, setNotionQuery] = useState("");
   // PR 在 GitHub 的模型里也是工单。默认不收——问「工单」要的是工单；
   // 但有些仓库的决策记录实际写在 PR 描述里，所以给个开关
   const [includePrs, setIncludePrs] = useState(false);
@@ -1293,7 +1313,12 @@ function SourceModal({
     kind === "rss" ||
     kind === "custom" ||
     kind === "github_issues" ||
-    kind === "jira_issues";
+    kind === "jira_issues" ||
+    kind === "s3" ||
+    kind === "azure_blob" ||
+    kind === "gcs" ||
+    kind === "webdav" ||
+    kind === "notion";
 
   const create = useMutation({
     mutationFn: () => {
@@ -1319,7 +1344,48 @@ function SourceModal({
                       project: jiraProject.trim(),
                       ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
                     }
-                  : {};
+                  : kind === "s3"
+                    ? {
+                        bucket: s3Bucket.trim(),
+                        ...(s3Prefix.trim() ? { prefix: s3Prefix.trim() } : {}),
+                        // 端点留空 = 公有云 S3；填了就是自建，后端据此走 path-style
+                        ...(s3Endpoint.trim() ? { endpoint: s3Endpoint.trim() } : {}),
+                        ...(s3Region.trim() ? { region: s3Region.trim() } : {}),
+                        ...(s3Key.trim() ? { access_key_id: s3Key.trim() } : {}),
+                        ...(s3Secret.trim() ? { secret_access_key: s3Secret.trim() } : {}),
+                      }
+                    : kind === "azure_blob"
+                      ? {
+                          bucket: s3Bucket.trim(),
+                          ...(s3Prefix.trim() ? { prefix: s3Prefix.trim() } : {}),
+                          ...(s3Endpoint.trim() ? { endpoint: s3Endpoint.trim() } : {}),
+                          ...(azAccount.trim() ? { account_name: azAccount.trim() } : {}),
+                          ...(azKey.trim() ? { account_key: azKey.trim() } : {}),
+                        }
+                      : kind === "gcs"
+                        ? {
+                            bucket: s3Bucket.trim(),
+                            ...(s3Prefix.trim() ? { prefix: s3Prefix.trim() } : {}),
+                            ...(s3Endpoint.trim() ? { endpoint: s3Endpoint.trim() } : {}),
+                            ...(gcsKey.trim()
+                              ? { service_account_key: gcsKey.trim() }
+                              : {}),
+                          }
+                        : kind === "webdav"
+                          ? {
+                              base_url: davUrl.trim(),
+                              ...(davPath.trim() ? { path: davPath.trim() } : {}),
+                              ...(davUser.trim() ? { username: davUser.trim() } : {}),
+                              ...(davPass ? { password: davPass } : {}),
+                            }
+                          : kind === "notion"
+                            ? {
+                                token: notionToken.trim(),
+                                ...(notionQuery.trim()
+                                  ? { query: notionQuery.trim() }
+                                  : {}),
+                              }
+                            : {};
       return api.createSource(kbId, {
         kind,
         name: name.trim(),
@@ -1341,7 +1407,13 @@ function SourceModal({
         ? feedUrl.trim()
         : kind === "custom"
           ? endpoint.trim()
-          : true);
+          : kind === "notion"
+            ? notionToken.trim()
+            : kind === "webdav"
+              ? davUrl.trim()
+            : kind === "s3" || kind === "azure_blob" || kind === "gcs"
+            ? s3Bucket.trim()
+            : true);
 
   // 注意用 div 而非 label：label 会把 :hover/click 转发给内部第一个可标记控件
   //（button 也算），导致图标网格/日程选择器悬停时第一个按钮常亮
@@ -1377,6 +1449,11 @@ function SourceModal({
                 "rss",
                 "github_issues",
                 "jira_issues",
+                "s3",
+                "azure_blob",
+                "gcs",
+                "webdav",
+                "notion",
                 "api",
                 "custom",
               ] as const
@@ -1516,6 +1593,159 @@ function SourceModal({
                   placeholder="Basic dXNlcjp0b2tlbg=="
                   value={authHeader}
                   onChange={(e) => setAuthHeader(e.target.value)}
+                />,
+              )}
+            </>
+          )}
+          {(kind === "s3" || kind === "azure_blob" || kind === "gcs") && (
+            <>
+              {field(
+                S.library.s3BucketField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  placeholder="documents"
+                  value={s3Bucket}
+                  onChange={(e) => setS3Bucket(e.target.value)}
+                />,
+              )}
+              {field(
+                S.library.s3PrefixField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  placeholder="reports/2026/"
+                  value={s3Prefix}
+                  onChange={(e) => setS3Prefix(e.target.value)}
+                />,
+              )}
+              {field(
+                S.library.s3EndpointField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  placeholder="http://minio.internal:9000"
+                  value={s3Endpoint}
+                  onChange={(e) => setS3Endpoint(e.target.value)}
+                />,
+              )}
+              {field(
+                S.library.s3RegionField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  placeholder="us-east-1"
+                  value={s3Region}
+                  onChange={(e) => setS3Region(e.target.value)}
+                />,
+              )}
+              {kind === "s3" && (
+                <>
+                  {field(
+                    S.library.s3KeyField,
+                    <input
+                      className="input-dark w-full px-3 py-2 text-sm font-mono"
+                      value={s3Key}
+                      onChange={(e) => setS3Key(e.target.value)}
+                    />,
+                  )}
+                  {field(
+                    S.library.s3SecretField,
+                    <input
+                      className="input-dark w-full px-3 py-2 text-sm font-mono"
+                      type="password"
+                      value={s3Secret}
+                      onChange={(e) => setS3Secret(e.target.value)}
+                    />,
+                  )}
+                </>
+              )}
+              {kind === "azure_blob" && (
+                <>
+                  {field(
+                    S.library.azAccountField,
+                    <input
+                      className="input-dark w-full px-3 py-2 text-sm font-mono"
+                      value={azAccount}
+                      onChange={(e) => setAzAccount(e.target.value)}
+                    />,
+                  )}
+                  {field(
+                    S.library.azKeyField,
+                    <input
+                      className="input-dark w-full px-3 py-2 text-sm font-mono"
+                      type="password"
+                      value={azKey}
+                      onChange={(e) => setAzKey(e.target.value)}
+                    />,
+                  )}
+                </>
+              )}
+              {kind === "gcs" &&
+                field(
+                  S.library.gcsKeyField,
+                  <textarea
+                    className="input-dark w-full px-3 py-2 text-sm font-mono h-24"
+                    placeholder='{"type":"service_account",...}'
+                    value={gcsKey}
+                    onChange={(e) => setGcsKey(e.target.value)}
+                  />,
+                )}
+            </>
+          )}
+          {kind === "webdav" && (
+            <>
+              {field(
+                S.library.davUrlField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  placeholder="https://cloud.example.com/remote.php/dav/files/alice"
+                  value={davUrl}
+                  onChange={(e) => setDavUrl(e.target.value)}
+                />,
+              )}
+              {field(
+                S.library.davPathField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  placeholder="/Documents"
+                  value={davPath}
+                  onChange={(e) => setDavPath(e.target.value)}
+                />,
+              )}
+              {field(
+                S.library.davUserField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  value={davUser}
+                  onChange={(e) => setDavUser(e.target.value)}
+                />,
+              )}
+              {field(
+                S.library.davPassField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  type="password"
+                  value={davPass}
+                  onChange={(e) => setDavPass(e.target.value)}
+                />,
+              )}
+            </>
+          )}
+          {kind === "notion" && (
+            <>
+              {field(
+                S.library.notionTokenField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  type="password"
+                  placeholder="ntn_..."
+                  value={notionToken}
+                  onChange={(e) => setNotionToken(e.target.value)}
+                />,
+              )}
+              {field(
+                S.library.notionQueryField,
+                <input
+                  className="input-dark w-full px-3 py-2 text-sm font-mono"
+                  value={notionQuery}
+                  onChange={(e) => setNotionQuery(e.target.value)}
                 />,
               )}
             </>

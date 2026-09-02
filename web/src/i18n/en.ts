@@ -119,6 +119,47 @@ export const en = {
     deploymentAdmin: "Deployment admin",
     openKb: "Open",
     kbSettingsBtn: "Settings",
+    /* 个人令牌页（0014 / 0016 A2）：给 agent 的钥匙，以这个人的身份行事 */
+    tokensNav: "Agents & tokens",
+    tokensTitle: "Personal access tokens",
+    tokensHint:
+      "A token lets an agent reach Utopia over MCP as you, never with more than you can do yourself. Read-only by default, limited to the bases you pick, revocable here at any time.",
+    newToken: "New token",
+    tokenName: "Name",
+    tokenNamePlaceholder: "My laptop",
+    tokenScope: "Scope",
+    scopeRead: "Read",
+    scopeWrite: "Write",
+    scopeHint:
+      "Effective rights are your own role ∩ this scope. Write is a ceiling, not a grant: a viewer's write token still cannot write.",
+    tokenKbs: "Knowledge bases",
+    kbsAllHint: "Nothing selected means every base you can open.",
+    tokenExpires: "Expires",
+    expiresDays: (n: number) => `${n} days`,
+    expiresNever: "Never",
+    issueToken: "Create token",
+    issuedTitle: "Copy it now. It will not be shown again.",
+    issuedHint:
+      "Utopia keeps only a hash of it. If you lose it, revoke it here and create another.",
+    copy: "Copy",
+    copied: "Copied",
+    mcpTitle: "MCP client configuration",
+    mcpHint:
+      "For Claude Code, Claude Desktop and other Streamable HTTP clients. Each base has its own endpoint, so pick the one the agent should talk to. Other clients spell the keys differently.",
+    mcpBase: "Base",
+    yourTokens: "Your tokens",
+    noTokens: "No tokens yet.",
+    allBases: "All bases",
+    nBases: (n: number) => `${n} base${n === 1 ? "" : "s"}`,
+    lastUsed: (d: string) => `last used ${d}`,
+    neverUsed: "never used",
+    expiresOn: (d: string) => `expires ${d}`,
+    noExpiry: "no expiry",
+    createdOn: (d: string) => `created ${d}`,
+    revoke: "Revoke",
+    revokeConfirm: "Revoke?",
+    revokedOn: (d: string) => `revoked ${d}`,
+    tokenDone: "Done",
     roleNames: {
       owner: "Owner",
       admin: "Admin",
@@ -418,6 +459,11 @@ export const en = {
       custom: "Custom",
       github_issues: "GitHub issues",
       jira_issues: "Jira issues",
+      s3: "S3 / MinIO",
+      azure_blob: "Azure Blob",
+      gcs: "Google Cloud Storage",
+      webdav: "WebDAV",
+      notion: "Notion",
     },
     sourceKindHints: {
       folder:
@@ -432,6 +478,24 @@ export const en = {
         "Syncs a repository's issues. **Each ticket, together with its state history**, becomes " +
         "one document — when it was opened, closed, relabelled, reassigned, all dated. " +
         "Without a token GitHub allows only 60 requests an hour.",
+      s3:
+        "Reads documents out of an S3 bucket, or anything speaking the same protocol " +
+        "(MinIO, Ceph, R2). **Leave the endpoint empty for AWS**; fill it in for a " +
+        "self-hosted one. Each object becomes a document dated by its last modification.",
+      azure_blob:
+        "Reads documents out of an Azure Blob container. Leave the endpoint empty for " +
+        "Azure itself; fill it in for Azurite or a gateway.",
+      gcs:
+        "Reads documents out of a Google Cloud Storage bucket. The service account JSON " +
+        "goes in whole — there is no file on the server to point at.",
+      webdav:
+        "Reads documents off a WebDAV share — Nextcloud, ownCloud, Synology, or anything " +
+        "else speaking the protocol. Walks folders one level at a time; each file becomes " +
+        "a document dated by its last modification.",
+      notion:
+        "Syncs the pages a Notion integration can see — share a page with the integration " +
+        "and it appears here. Dated by when the page was last edited, which is the page's " +
+        "own clock rather than ours.",
       api: "External systems push JSON documents here, authenticated with this source's own token.",
       custom:
         "Polls a URL you control on a schedule — your service returns JSON items and Utopia keeps them in sync.",
@@ -478,6 +542,21 @@ export const en = {
     repoField: "Repository (owner/name)",
     jiraUrlField: "Jira site URL",
     jiraProjectField: "Project key",
+    s3BucketField: "Bucket",
+    s3PrefixField: "Prefix (optional — without one the whole bucket is read)",
+    s3EndpointField: "Endpoint (leave empty for AWS S3)",
+    s3RegionField: "Region",
+    s3KeyField: "Access key ID",
+    s3SecretField: "Secret access key",
+    azAccountField: "Storage account name",
+    azKeyField: "Account key",
+    gcsKeyField: "Service account JSON (paste the whole file)",
+    davUrlField: "Server URL",
+    davPathField: "Folder (optional — defaults to the root)",
+    davUserField: "Username",
+    davPassField: "Password",
+    notionTokenField: "Internal integration token",
+    notionQueryField: "Search term (optional — empty takes every shared page)",
     tokenField: "GitHub token (optional, never shown again)",
     includePullRequests: "Treat pull requests as tickets too",
     interval: "Sync schedule",
@@ -1149,6 +1228,7 @@ export const en = {
     empty: "Nothing to review — the graph is clean.",
     historyEmpty: "No merges yet.",
     // 左栏分类导航
+    railPending: "Awaiting your nod",
     railDuplicates: "Duplicates",
     railConflicts: "Conflicts",
     railUnconfirmed: "Unconfirmed",
@@ -1170,6 +1250,8 @@ export const en = {
       "review.keep": "Kept apart",
       "fact.confirm": "Confirmed",
       "fact.reject": "Rejected",
+      "fact.nod_confirmed": "Confirmed a remembered fact",
+      "fact.nod_rejected": "Rejected a remembered fact",
       "fact.close": "Closed",
       "conflict.close_old": "Closed old",
       "conflict.keep_both": "Kept both",
@@ -1231,6 +1313,9 @@ export const en = {
     violationAsymmetry: "Both directions asserted",
     violationCycle: "Cycle through the transitive chain",
     violationFunctional: "Should hold one value, holds two",
+    /** 签名违规（#190 / #196）：一条事实的主语或宾语落在谓词声明的类型之外——
+     *  抽取时会掰正，采纳与合并这两条路从前绕过了检查 */
+    violationSignature: "Subject or object outside the declared types",
     violationVia: (p: string) => `via ${p}`,
     violationPath: (n: number) => `${n} facts in the cycle`,
     retractFact: "Data is wrong",
@@ -1251,6 +1336,19 @@ export const en = {
     mappingsHint:
       "Proposed mappings from a business concept to how it is computed. Confirm one and Ask uses it instead of guessing from the schema.",
     mappingDerived: "derived",
+    // 记忆抽出、等人点头的事实（0015）
+    pending: "Awaiting your confirmation",
+    pendingHint:
+      "Facts extracted from what you asked the assistant to remember. Nothing here is in the graph yet: " +
+      "the sentence is kept, the facts wait for your nod. Confirm to add with the sentence as evidence; " +
+      "reject and it will not be proposed again.",
+    pendingNoPredicate: "The ontology has no relation for this; the word is the model's own.",
+    pendingNoPredicateChip: "no relation in ontology",
+    pendingSaidBy: (name: string) => `said by ${name}`,
+    nodCardTitle: (n: number) =>
+      n === 1
+        ? "One fact extracted from this. Confirm to add it to the graph, or reject."
+        : `${n} facts extracted from this. Confirm to add them to the graph, or reject.`,
     lowConfidenceHint:
       "Extracted with confidence below 75%. Confirm to trust, reject to remove from the graph (the ledger keeps the record).",
     confirm: "Confirm",

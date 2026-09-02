@@ -108,6 +108,45 @@ export const zh: Strings = {
     deploymentAdmin: "部署管理员",
     openKb: "打开",
     kbSettingsBtn: "设置",
+    tokensNav: "Agent 与令牌",
+    tokensTitle: "个人访问令牌",
+    tokensHint:
+      "令牌让 agent 经 MCP 以你的身份使用 Utopia，权限永远不超过你自己。缺省只读，限定到你选的库，随时可在这里撤销。",
+    newToken: "新令牌",
+    tokenName: "名字",
+    tokenNamePlaceholder: "我的笔记本",
+    tokenScope: "范围",
+    scopeRead: "只读",
+    scopeWrite: "可写",
+    scopeHint:
+      "有效权限 = 你自己的角色 ∩ 这个范围。可写是上限不是授权：只读成员的可写令牌照样写不了。",
+    tokenKbs: "知识库",
+    kbsAllHint: "一个都不选 = 你能进的全部库。",
+    tokenExpires: "过期",
+    expiresDays: (n: number) => `${n} 天`,
+    expiresNever: "不过期",
+    issueToken: "创建令牌",
+    issuedTitle: "现在就复制，之后不会再显示。",
+    issuedHint: "Utopia 只保存它的哈希。丢了就在这里撤销，再建一枚。",
+    copy: "复制",
+    copied: "已复制",
+    mcpTitle: "MCP 客户端配置",
+    mcpHint:
+      "适用于 Claude Code、Claude Desktop 及其它 Streamable HTTP 客户端。每个库有自己的端点，选 agent 要对话的那个库。别的客户端键名可能不同。",
+    mcpBase: "库",
+    yourTokens: "你的令牌",
+    noTokens: "还没有令牌。",
+    allBases: "全部库",
+    nBases: (n: number) => `${n} 个库`,
+    lastUsed: (d: string) => `最近使用 ${d}`,
+    neverUsed: "从未使用",
+    expiresOn: (d: string) => `${d} 过期`,
+    noExpiry: "不过期",
+    createdOn: (d: string) => `${d} 创建`,
+    revoke: "撤销",
+    revokeConfirm: "确认撤销？",
+    revokedOn: (d: string) => `${d} 已撤销`,
+    tokenDone: "完成",
     roleNames: {
       owner: "所有者",
       admin: "管理员",
@@ -386,6 +425,11 @@ export const zh: Strings = {
       custom: "自定义",
       github_issues: "GitHub 工单",
       jira_issues: "Jira 工单",
+      s3: "S3 / MinIO",
+      azure_blob: "Azure Blob",
+      gcs: "Google Cloud Storage",
+      webdav: "WebDAV",
+      notion: "Notion",
     },
     sourceKindHints: {
       folder:
@@ -399,6 +443,22 @@ export const zh: Strings = {
         "同步一个仓库的工单。**每张工单连同它的状态变更史**成为一篇文档——" +
         "何时开出、何时关闭、标签与负责人怎么变的，都带着日期。未配令牌时" +
         "每小时只有 60 次请求配额。",
+      s3:
+        "从 S3 桶里读文档，或者任何说同一套协议的东西（MinIO、Ceph、R2）。" +
+        "**端点留空就是 AWS**，填了就是自建。每个对象成为一篇文档，" +
+        "日期取它最后一次修改的时刻。",
+      azure_blob:
+        "从 Azure Blob 容器里读文档。用 Azure 本身就把端点留空，" +
+        "填了是指向 Azurite 或某个网关。",
+      gcs:
+        "从 Google Cloud Storage 桶里读文档。服务账号 JSON 整份贴进来——" +
+        "服务器上没有那个文件可以指。",
+      webdav:
+        "从 WebDAV 网盘读文档——Nextcloud、ownCloud、群晖，以及一切说这套协议的。" +
+        "逐层走目录，每个文件成为一篇文档，日期取它最后一次修改的时刻。",
+      notion:
+        "同步一个 Notion 集成能看见的页面——把页面分享给集成，它就会出现在这里。" +
+        "日期取页面最后一次编辑的时刻，那是页面自己的时钟，不是我们抓它的时刻。",
       api: "外部系统把 JSON 文档推送到这里，用这个来源自己的令牌认证。",
       custom:
         "按计划轮询一个你控制的 URL——你的服务返回 JSON 条目，Utopia 保持同步。",
@@ -444,6 +504,21 @@ export const zh: Strings = {
     repoField: "仓库（owner/name）",
     jiraUrlField: "Jira 地址",
     jiraProjectField: "项目 key",
+    s3BucketField: "桶名",
+    s3PrefixField: "前缀（可选——不填则读整个桶）",
+    s3EndpointField: "端点（用 AWS S3 就留空）",
+    s3RegionField: "区域",
+    s3KeyField: "Access Key ID",
+    s3SecretField: "Secret Access Key",
+    azAccountField: "存储账号名",
+    azKeyField: "账号密钥",
+    gcsKeyField: "服务账号 JSON（整个文件贴进来）",
+    davUrlField: "服务器地址",
+    davPathField: "目录（可选——默认从根开始）",
+    davUserField: "用户名",
+    davPassField: "密码",
+    notionTokenField: "内部集成令牌",
+    notionQueryField: "搜索词（可选——留空则取全部已分享页面）",
     tokenField: "GitHub 令牌（可选，不再显示）",
     includePullRequests: "把 PR 也当工单收进来",
     interval: "同步计划",
@@ -1032,6 +1107,7 @@ export const zh: Strings = {
     tabHistory: "历史",
     empty: "没有待审阅的——图谱是干净的。",
     historyEmpty: "还没有合并记录。",
+    railPending: "等你点头",
     railDuplicates: "重复项",
     railConflicts: "冲突",
     railUnconfirmed: "未确认",
@@ -1052,6 +1128,8 @@ export const zh: Strings = {
       "review.keep": "保持分开",
       "fact.confirm": "已确认",
       "fact.reject": "已驳回",
+      "fact.nod_confirmed": "已确认一条记忆事实",
+      "fact.nod_rejected": "已驳回一条记忆事实",
       "fact.close": "已闭合",
       "conflict.close_old": "闭合旧的",
       "conflict.keep_both": "两条都留",
@@ -1109,6 +1187,7 @@ export const zh: Strings = {
     violationAsymmetry: "两个方向都断言了",
     violationCycle: "传递链绕成了环",
     violationFunctional: "该只有一个值，却有两个",
+    violationSignature: "主语或宾语不在关系声明的类型里",
     violationVia: (p: string) => `依据 ${p}`,
     violationPath: (n: number) => `环上 ${n} 条事实`,
     retractFact: "数据错了",
@@ -1128,6 +1207,16 @@ export const zh: Strings = {
     mappingsHint:
       "从业务概念到「这个数怎么算」的提议。确认之后问数直接用这个口径，而不是每次从 schema 猜。",
     mappingDerived: "派生",
+    // 记忆抽出、等人点头的事实（0015）
+    pending: "等你确认",
+    pendingHint:
+      "从你让助手记住的话里抽出的事实。这里的东西都还没进图：那句话已经存下，事实等你点头。" +
+      "确认后以那句话为证据进账本；驳回后不会再被提议。",
+    pendingNoPredicate: "本体里没有这个关系，这个词是模型自己的说法。",
+    pendingNoPredicateChip: "本体里没有这个关系",
+    pendingSaidBy: (name: string) => `${name} 说的`,
+    nodCardTitle: (n: number) =>
+      n === 1 ? "从这句话里抽出 1 条事实。确认进图，或驳回。" : `从这句话里抽出 ${n} 条事实。确认进图，或驳回。`,
     lowConfidenceHint:
       "抽取时置信度低于 75%。确认表示采信，驳回表示从图谱移除（台账仍留有记录）。",
     confirm: "确认",
