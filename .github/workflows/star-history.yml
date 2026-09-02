@@ -1,0 +1,66 @@
+name: Star History
+
+on:
+  schedule:
+    # 每天一次。星标曲线一周才动一次的话，图上那一段是平的——
+    # 而它存在的意义正是让人看见增长的形状
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  star-history:
+    runs-on: ubuntu-latest
+    # 网络接口卡住的话不该跑满 GitHub 的六小时上限。翻页 + 画图实测不到一分钟
+    timeout-minutes: 10
+    steps:
+      # 图由 `scripts/star-history.mjs` 生成，不再用第三方 action。
+      #
+      # 换掉 `lowlighter/metrics` 有两个理由。一是它把「累计总数」和
+      # 「每天新增」绑在同一个开关上，模板里没有只留累计那张的办法，
+      # 而想要的就是传统的那一条曲线。二是**它是跑在 `contents: write`
+      # 之下的第三方代码**——这个权限底下跑我们自己的脚本，安心得多。
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Render the chart
+        env:
+          REPO: ${{ github.repository }}
+          # **`GITHUB_TOKEN` 在这里不够**：GitHub 在 2026-06-30 把星标
+          # 时间线限制成只有仓库的管理员/协作者可读。这个 secret 是一个
+          # classic token（fine-grained 的读不了这份数据），已经验过能取到。
+          # 名字沿用 `METRICS_TOKEN` 是为了不必再改一次仓库设置
+          GITHUB_TOKEN: ${{ secrets.METRICS_TOKEN }}
+          OUT: chart/star-history.svg
+        run: node scripts/star-history.mjs
+
+      # **提交到专用的孤儿分支，不碰默认分支。**
+      # `dev` 上有分支保护（必须走 PR、`enforce_admins: true`），机器人
+      # 直推一定被拒；而为了一张图去松保护是本末倒置。`assets` 与 `dev`
+      # 没有共同历史，在那边提交碰不到任何源码。
+      - name: Commit to the assets branch
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch assets \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" out
+          mkdir -p out/assets
+          # 两张：深色主题用白线那张，浅色用深线那张（README 里 `<picture>`
+          # 按主题选）。白线在 GitHub 浅色底上是看不见的，所以少一张都不行
+          cp chart/star-history.svg chart/star-history-light.svg out/assets/
+          cd out
+          # 星标没变化的那天不留空提交——每天一条 "no change" 会把
+          # 这个分支的历史淹掉
+          if git diff --quiet -- assets/; then
+            echo "chart unchanged, nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/
+          git commit -m "Star history: $(date -u +%Y-%m-%d)"
+          git push

@@ -8,12 +8,15 @@ mod events_routes;
 mod graph_routes;
 mod kbs;
 mod mapping_routes;
+mod mcp;
 mod members_routes;
 pub(crate) mod ontology_routes;
 mod review_routes;
 mod search_routes;
 mod settings_routes;
 mod sources_routes;
+mod token_routes;
+mod tools;
 mod workspaces;
 
 use axum::extract::DefaultBodyLimit;
@@ -118,6 +121,15 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         .route(
             "/admin/data-sources/{id}/grants/{workspace_id}",
             axum::routing::put(datasource_routes::grant).delete(datasource_routes::revoke),
+        )
+        .route("/kbs/{id}/mcp", post(mcp::handle))
+        .route(
+            "/me/tokens",
+            get(token_routes::list).post(token_routes::issue),
+        )
+        .route(
+            "/me/tokens/{token_id}",
+            axum::routing::delete(token_routes::revoke),
         )
         .route("/kbs/{id}/mappings", get(mapping_routes::list))
         .route(
@@ -243,6 +255,11 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         )
         .route("/kbs/{id}/search", post(search_routes::search))
         .route("/kbs/{id}/chat", post(chat::chat))
+        // 刷新页面后重新接上正在生成的那个回答（见 `live`）
+        .route(
+            "/kbs/{id}/conversations/{conversation_id}/stream",
+            get(chat::reattach),
+        )
         .route("/kbs/{id}/conversations", get(chat::list_conversations))
         .route(
             "/kbs/{id}/conversations/{conversation_id}",

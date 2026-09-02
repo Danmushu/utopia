@@ -291,7 +291,8 @@ export interface DerivedFact {
   object: string;
   predicate: string;
   /** 靠哪条规则推的 */
-  rule: "transitive" | "symmetric";
+  /** 靠哪条规则推的。后两种是 0017 补上的跨谓词规则 */
+  rule: "transitive" | "symmetric" | "inverse" | "sub_property";
   valid_from: string | null;
   valid_to: string | null;
   confidence: number;
@@ -446,7 +447,11 @@ export interface OntologyDefect {
     | "transitive_and_functional"
     | "subclass_cycle"
     | "disjoint_with_ancestor"
-    | "inherits_disjoint";
+    | "inherits_disjoint"
+    // 0017 加的三类：都在谓词上，前两类关于逆，第三类是子属性成环
+    | "inverse_of_itself"
+    | "inverse_not_mutual"
+    | "sub_property_cycle";
   subject_label: string | null;
   other_label: string | null;
   path_labels: string[];
@@ -515,6 +520,13 @@ export interface GraphEdge {
   /** true = 这条边是**推出来的**，不是任何人断言的（R1）。
    *  与 `inferred` 不是一回事：那个说「名字来自原文」，这个说「不是谁说的」 */
   derived: boolean;
+  /** 推它出来的那条规则；断言的边为 null。
+   *  界面靠它认出 `inverse`——那种边与来源边是同一件事的两种说法，
+   *  画两条只是把冗余画了两遍（见 Graph 的 `layOutParallelEdges`） */
+  rule: string | null;
+  /** 推它出来用到的前提事实 id（按证明顺序）；断言的边为空。
+   *  并边要靠它认准来源——只按节点对匹配会把说法挂到错的边上 */
+  premises: string[];
   valid_from: string | null;
   valid_to: string | null;
   confidence: number;
@@ -635,6 +647,10 @@ export interface RelationTypeView {
   is_symmetric: boolean;
   is_asymmetric: boolean;
   is_irreflexive: boolean;
+  /** 指向另一个关系的两条：`p⁻¹ = q` 与 `p ⊑ q`。是 id 不是布尔，
+   *  所以界面上是下拉框 */
+  inverse_of: string | null;
+  sub_property_of: string | null;
   builtin: boolean;
   description: string;
   /** relation（宾语是实体）| attribute（宾语是字面值） */
@@ -766,6 +782,10 @@ export interface ChatStep {
   kind: "search" | "docs" | "entity" | "facts" | "changes" | "query" | "tool";
   label: string;
   detail: string;
+  /** 这一步发生时正文已经有多长（UTF-16 码元，与 `string.length` 同一单位）。
+   *  据此把轨迹穿回正文里，而不是全堆在最前面。
+   *  **这条迁移之前的消息没有它**——缺省时整段轨迹回到顶部，即旧的样子 */
+  at?: number;
 }
 
 /** 会话行（Chat 左栏列表）。 */
@@ -1182,9 +1202,7 @@ export const api = {
        *  那一批，把上限当成规模显示是这个接口从前最误导人的地方 */
       total_nodes?: number;
       total_edges?: number;
-    }>(
-      `/api/v1/kbs/${kbId}/graph/overview${limit ? `?limit=${limit}` : ""}`,
-    ),
+    }>(`/api/v1/kbs/${kbId}/graph/overview${limit ? `?limit=${limit}` : ""}`),
   /** 邻域视图**没有总数**：它本来就只是一小片，说「共 325 个」没有意义。
    *  两个字段声明成可选，好让调用方与总览共用一个类型 */
   graphNeighborhood: (kbId: string, entityId: string) =>
@@ -1674,28 +1692,64 @@ export const conversationsApi = {
     }),
 };
 
+export interface ChatHandlers {
+  onConversation: (id: string) => void;
+  onSources: (s: Source[]) => void;
+  onStep: (s: ChatStep) => void;
+  onDelta: (text: string) => void;
+  onDone: () => void;
+  onError: (message: string) => void;
+  /** 接上一个已经在跑的回答：这是它此刻的样子，**覆盖，不是追加** */
+  onSnapshot?: (s: { content: string; steps: ChatStep[]; sources: Source[] }) => void;
+  /** 这个会话没有在跑的生成——最常见的答案，不是错误 */
+  onIdle?: () => void;
+}
+
+/** 接上一个正在生成的回答（刷新页面之后走这里）。
+ *
+ *  与 `streamChat` 读的是同一条事件流，只是多了开头那份快照。 */
+export function reattachChat(
+  kbId: string,
+  conversationId: string,
+  handlers: ChatHandlers,
+): () => void {
+  return consumeChatStream(
+    (signal) =>
+      fetch(`/api/v1/kbs/${kbId}/conversations/${conversationId}/stream`, {
+        credentials: "include",
+        signal,
+      }),
+    handlers,
+  );
+}
+
 export function streamChat(
   kbId: string,
   body: { conversation_id?: string; message: string },
-  handlers: {
-    onConversation: (id: string) => void;
-    onSources: (s: Source[]) => void;
-    onStep: (s: ChatStep) => void;
-    onDelta: (text: string) => void;
-    onDone: () => void;
-    onError: (message: string) => void;
-  },
+  handlers: ChatHandlers,
 ): () => void {
-  const controller = new AbortController();
-  (async () => {
-    try {
-      const res = await fetch(`/api/v1/kbs/${kbId}/chat`, {
+  return consumeChatStream(
+    (signal) =>
+      fetch(`/api/v1/kbs/${kbId}/chat`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+        signal,
+      }),
+    handlers,
+  );
+}
+
+/** SSE 的读法只有一份：发起请求的方式不同，收下来之后的处理完全一样。 */
+function consumeChatStream(
+  open: (signal: AbortSignal) => Promise<Response>,
+  handlers: ChatHandlers,
+): () => void {
+  const controller = new AbortController();
+  (async () => {
+    try {
+      const res = await open(controller.signal);
       if (!res.ok || !res.body) {
         let message = res.statusText;
         try {
@@ -1732,6 +1786,8 @@ export function streamChat(
             handlers.onStep(JSON.parse(data) as ChatStep);
           else if (event === "delta")
             handlers.onDelta((JSON.parse(data) as { text: string }).text);
+          else if (event === "snapshot") handlers.onSnapshot?.(JSON.parse(data));
+          else if (event === "idle") handlers.onIdle?.();
           else if (event === "done") handlers.onDone();
           else if (event === "error") handlers.onError(data);
         }
