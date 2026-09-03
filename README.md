@@ -131,7 +131,7 @@ Please read [SECURITY.md](SECURITY.md) before exposing it to the public internet
 - 💬 [Discussions](https://github.com/deeplethe/utopia/discussions): discuss the project, share your experience, and leave feedback
 - 🐛 [Issues](https://github.com/deeplethe/utopia/issues): report bugs, ask design questions, and submit feature requests
 - 🤝 [Contributing](CONTRIBUTING.md): development setup, pre-push checks, and DCO sign-off
-- 🔌 [Ontology2SQL](https://github.com/deeplethe/ontology2sql): the ontology-driven text-to-SQL approach referenced above
+- 🔌 [Ontology2SQL](https://github.com/deeplethe/ontology2sql): the ontology-driven text-to-SQL method referenced above
 
 ## License
 
