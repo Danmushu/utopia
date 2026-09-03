@@ -674,6 +674,20 @@ export const zh: Strings = {
     derivedHint:
       "没有人断言过的边——引擎按本体声明的公理推出来的。每一条都附着它用到的前提。",
     derivedNoProof: "前提已经不在了。",
+    contestedChip: "有争议",
+    contestedHint: (kind: string, derived: string | null) =>
+      kind === "derived_contradiction"
+        ? `有一条推出来的事实与它抵触${derived ? `：${derived}` : ""}。去 Review 看。`
+        : kind === "temporal_conflict"
+          ? "有一条更新的断言在时间上与它冲突。去 Review 看。"
+          : "这条断言违反了本体声明的公理。去 Review 看。",
+    blockedTitle: "没落地的",
+    blockedHint: "引擎本可以画出这些边，被一条断言挡住了。图上画成幽灵边。",
+    blockedBy: (t: string) => `挡住它的：${t}`,
+    blockedReview: "去 Review",
+    proofStep: (n: number) => `第 ${n} 步`,
+    proofRetracted: "后来撤了",
+    proofLoading: "正在展开证明…",
     derivedPanel: "推理",
     derivedRunAsk: "对整个库重跑一遍推理？",
     derivedRunGo: "跑",
@@ -797,7 +811,12 @@ export const zh: Strings = {
         "只读的数据库连接，用于在「对话」里就你的数据提问。" +
         "在这里登记连接；每个知识库各自挂载允许查询的那些。",
       name: "名称",
-      connString: "连接串（postgres://user:pass@host:5432/db）",
+      connString: "连接串，前缀决定引擎",
+      connSchemes:
+        "postgres://user:pass@host:5432/db\n" +
+        "trino://user[:pass]@host:8080/catalog[/schema]   （Iceberg、Delta Lake、Hive）\n" +
+        "databricks://:TOKEN@host/sql/1.0/warehouses/ID?catalog=main\n" +
+        "snowflake://:TOKEN@account.snowflakecomputing.com/DB/SCHEMA?warehouse=WH",
       add: "添加数据源",
       test: "测试",
       testOk: "已连接",
@@ -1174,6 +1193,15 @@ export const zh: Strings = {
     defectInverseSelf: "自己是自己的逆——写成「对称」更直白",
     defectInverseNotMutual: "逆关系没有指回来",
     defectSubPropertyCycle: "子属性绕成了环",
+    defectRulesDisagree: "两条规则推出互相抵触的结论",
+    rulesDisagreeCount: (n: number) => `${n} 对派生等这里定了再落地`,
+    rulesDisagreeRule: (
+      a: string,
+      va: string,
+      b: string,
+      vb: string,
+      axiom: string,
+    ) => `${va} 上的 ${a} 与 ${vb} 上的 ${b}，撞在 ${axiom} 上`,
     defectNeverInstantiable: "这个类永远不可能有实例",
     defectFixed: "已去本体里改了",
     defectAccepted: "先放着",
@@ -1192,6 +1220,20 @@ export const zh: Strings = {
     violationCycle: "传递链绕成了环",
     violationFunctional: "该只有一个值，却有两个",
     violationSignature: "主语或宾语不在关系声明的类型里",
+    violationDerived: "推出来的与断言相抵触",
+    derivedLine: (s: string, p: string, o: string) =>
+      `推出：${s} · ${p} · ${o}`,
+    derivedBy: (rule: string, via: string) => `由 ${via} 上的 ${rule}`,
+    assertedLine: (t: string) => `断言：${t}`,
+    hintStale: "这条断言没写结束日期，而推出来的那条起得更晚——它可能只是结束了。",
+    hintDuplicate: "有两个同名实体，它们可能是同一个。",
+    hintUnsure: "这条断言抽取时把握不大，去读一下原句。",
+    hintReadBoth: "读一下两边的原句，判断哪条错了。",
+    closeAssertion: "给断言一个结束日期",
+    retractAssertion: "撤掉断言",
+    seeDuplicates: "去看重复实体",
+    openOntology: "去本体页",
+    letBothStand: "两边都成立",
     violationVia: (p: string) => `依据 ${p}`,
     violationPath: (n: number) => `环上 ${n} 条事实`,
     retractFact: "数据错了",
