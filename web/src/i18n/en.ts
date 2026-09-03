@@ -24,7 +24,7 @@ export const en = {
     registration_closed:
       "Sign-up is closed on this deployment — ask an administrator for an account.",
     no_chat_model:
-      "No chat model configured yet. Set one under Settings → Models.",
+      "No chat model configured yet. Set one under Administration → Models.",
     bad_upload: "That upload could not be read.",
     upload_read_failed: "The file could not be read to the end.",
     no_files: "No file was attached.",
@@ -64,7 +64,7 @@ export const en = {
     no_data_sources: "No databases are mounted on this knowledge base.",
     // 授权是逐工作区的（0014）：源没授权给本库所属的工作区
     source_not_granted:
-      "This data source is not granted to this workspace. Ask a deployment admin to grant it in System settings → Data sources.",
+      "This data source is not granted to this workspace. Ask a deployment admin to grant it in Administration → Data sources.",
     memory_source_permanent:
       "The Memory source is part of the knowledge base and stays.",
     source_name_required: "Give this source a name.",
@@ -207,19 +207,23 @@ export const en = {
       },
       "llm.unreachable": {
         title: "The model endpoint gave no usable answer",
-        hint: "Extraction and embedding are stopped. Check the endpoint URL in system settings.",
+        hint: "Extraction and embedding are stopped. Check the endpoint URL in Administration → Models.",
       },
       "llm.rate_limited": {
         title: "The model endpoint is rate limiting us",
-        hint: "Documents were retried and still turned away, so some are missing facts. Lower model concurrency in system settings, or raise the quota on the account.",
+        hint: "Documents were retried and still turned away, so some are missing facts. Lower model concurrency in Administration, or raise the quota on the account.",
       },
       "llm.out_of_credit": {
         title: "The model account cannot pay for requests",
-        hint: "Extraction and embedding are stopped and will not resume on their own. Top up the account, or point system settings at an endpoint that can serve.",
+        hint: "Extraction and embedding are stopped and will not resume on their own. Top up the account, or set an endpoint that can serve in Administration → Models.",
       },
     } as Record<string, { title: string; hint: string } | undefined>,
     // 没见过的 kind 也要能显示：新告警源上线时前端可能还没更新
     unknownKind: (kind: string) => kind,
+    /** 修好之后接着跑（#216） */
+    runAgain: "Run those again",
+    requeued: (n: number) =>
+      n === 1 ? "1 job back in the queue" : `${n} jobs back in the queue`,
   },
 
   kbScope: {
@@ -307,7 +311,7 @@ export const en = {
         {
           h: "Retention and deletion",
           body: [
-            "Deleting a document removes its stored content and index entries. Facts already extracted into the knowledge graph remain, with their provenance, until removed through Review. Deleting a knowledge base permanently removes its documents, graph and sources.",
+            "Deleting a document removes it from the base and retires the facts that had no other source; facts with another source keep it as provenance. The content is kept so the deletion can be undone; a deleted document can be restored, and a re-upload of the same file restores it too. Deleting a knowledge base permanently removes its documents, graph and sources.",
           ],
         },
         {
@@ -359,6 +363,15 @@ export const en = {
     },
   },
   library: {
+    /** 删除是墓碑（#268）：说清作废了几条事实，并给撤销 */
+    deletedWithFacts: (n: number) =>
+      n === 0
+        ? "Document deleted"
+        : n === 1
+          ? "Document deleted · 1 fact retired with it"
+          : `Document deleted · ${n} facts retired with it`,
+    undo: "Undo",
+    restored: "Document restored",
     title: "Library",
     upload: "Upload files",
     uploading: "Uploading…",
@@ -610,8 +623,8 @@ export const en = {
     cleanupTitle: "Delete missing documents",
     cleanupHint: (n: number, name: string) =>
       `${n} document${n === 1 ? "" : "s"} in “${name}” ${n === 1 ? "is" : "are"} no longer ` +
-      "present in the source. Deleting removes their content and search entries permanently. " +
-      "Facts already extracted into the graph remain, with their provenance.",
+      "present in the source. Deleting removes them from the base and retires the facts that " +
+      "had no other source. Their content is kept, and a deleted document can be restored.",
     cleanupConfirm: "Delete them",
     deleteSourceTitle: "Delete this source",
     deleteSourceBody: (name: string) =>
@@ -631,7 +644,7 @@ export const en = {
     greeting: "Ask Utopia what it remembers",
     emptyTitle: "Chat",
     emptyBody:
-      "Converse with your knowledge base — cited answers, temporal questions, and it can remember.\nUpload documents in Library and configure a model in Settings first.",
+      "Converse with your knowledge base — cited answers, temporal questions, and it can remember.\nUpload documents in Library and configure a model in Administration → Models first.",
     placeholder: "Ask anything…",
     composerHint: "Enter to send · Shift+Enter for a new line",
     scopeLabel: "Knowledge base",
@@ -677,8 +690,13 @@ export const en = {
     backToOverview: "← Full graph",
     // 顺序不是随便排的：模型没配好之前，上传的文档只会排队等着，
     // 一个实体也抽不出来。先配模型，再传文档
+    // 管理页在头像菜单里叫 Administration，提示语得叫同一个名字（#267）。
+    // 能配模型的人和不能配的人看到的不是同一句：后者只能去找管理员
     emptyBody:
-      "The graph is empty. Configure a chat model in Settings first, then upload documents in the Library — entities and relations are extracted automatically.",
+      "The graph is empty. Ask an administrator to configure a chat model, then upload documents in the Library — entities and relations are extracted automatically.",
+    emptyBodyAdmin:
+      "The graph is empty. Configure a chat model under Administration → Models first, then upload documents in the Library — entities and relations are extracted automatically.",
+    emptyOpenModels: "Open Administration → Models",
     facts: "facts",
     noFacts: "No facts for this entity yet",
     confidence: "confidence",
@@ -697,6 +715,10 @@ export const en = {
     sectionRef: (filename: string, seq: number) =>
       `${filename} · section ${seq} →`,
     fromVersion: (v: number) => `v${v}`,
+    /** 证据所在的文档已删（#268）：事实还在是因为另有出处 */
+    sourceDeleted: "source deleted",
+    sourceDeletedHint:
+      "The document this quote came from was deleted. The fact stays because it has another source.",
     staleEvidenceHint:
       "This evidence comes from an earlier version of the document. " +
       "The document has since been updated; the fact itself is unaffected.",
@@ -844,7 +866,7 @@ export const en = {
     ongoing: "now",
   },
   settings: {
-    title: "System settings",
+    title: "Administration",
     tabModels: "Models",
     tabMembers: "Users",
     tabKbs: "Knowledge bases",
@@ -1375,6 +1397,9 @@ export const en = {
     violationVia: (p: string) => `via ${p}`,
     violationPath: (n: number) => `${n} facts in the cycle`,
     retractFact: "Data is wrong",
+    /** 双事实与环上的违规：撤具体哪一条（#202） */
+    retractThis: "Retract",
+    retractThisHint: "Withdraw this fact from the graph; the other one stays.",
     relaxAxiom: "Axiom is wrong",
     acceptBoth: "Both are right",
     runCheck: "Run check",
@@ -1463,6 +1488,10 @@ export const en = {
     inferEvery: "Re-derive every",
     minutes: "minutes",
     lastInference: (when: string) => `last run ${when}`,
+    failedJobs: (n: number) => (n === 1 ? "1 failed job" : `${n} failed jobs`),
+    requeue: "Run again",
+    requeued: (n: number) =>
+      n === 1 ? "1 job back in the queue" : `${n} jobs back in the queue`,
     /* 语料语言。措辞要把"这不是界面语言"讲清楚，否则一定有人当成界面开关 */
     ontologyLang: "Language of this ontology",
     ontologyLangNote:

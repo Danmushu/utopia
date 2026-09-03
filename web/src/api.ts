@@ -164,6 +164,8 @@ export interface Doc {
    *  `migrations/0002_ingest.sql` 的 `tags` 列上 */
   tags: string[];
   missing_since: string | null;
+  /** 墓碑（#268）：删了但留着，可撤销 */
+  deleted_at: string | null;
   created_at: string;
 }
 
@@ -519,6 +521,8 @@ export interface AxiomViolation {
   /** 审核线索（0017 §2），一次只给一条：旧断言没写结束日期、有同名实体、
    *  抽取置信度低。没有就空 */
   hint: "stale" | "duplicate" | "unsure" | null;
+  /** 环上的每一条事实，按顺序；其余种类为空。撤事实要指名撤哪条（#202） */
+  path: { id: string; text: string }[];
 }
 /** 本体自己的一处自相矛盾。**与 AxiomViolation 不是一回事**：那个说
  *  「事实与定义抵触」，这个说「定义自己站不住」，后者更根本 */
@@ -743,6 +747,8 @@ export interface Evidence {
   doc_version: number;
   /** 文档已有更新版本（证据停留在旧版；不代表事实失效） */
   stale: boolean;
+  /** 这条证据的文档已被删除；事实还活着是因为另有出处（#268） */
+  document_deleted: boolean;
 }
 
 export interface ChunkFull {
@@ -981,6 +987,17 @@ export const api = {
     );
   },
   alertsUnread: () => request<{ unread: number }>("/api/v1/alerts/unread"),
+  /** 失败任务回队列（#216）。库内一条、全局一条（管理员）；范围可按种类与失败时间收窄 */
+  failedJobs: (kbId: string) =>
+    request<{ failed: number }>(`/api/v1/kbs/${kbId}/jobs/failed`),
+  requeueJobs: (
+    kbId: string | null,
+    body: { kind?: string; failed_since?: string } = {},
+  ) =>
+    request<{ requeued: number }>(
+      kbId ? `/api/v1/kbs/${kbId}/jobs/requeue` : "/api/v1/jobs/requeue",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   alertReadGroup: (g: {
     kb_id: string | null;
     kind: string;
@@ -1332,7 +1349,13 @@ export const api = {
     );
   },
   deleteDocument: (id: string) =>
-    request<{ ok: boolean }>(`/api/v1/documents/${id}`, { method: "DELETE" }),
+    request<{ ok: boolean; deletion_id: string; invalidated_facts: number }>(
+      `/api/v1/documents/${id}`,
+      { method: "DELETE" },
+    ),
+  /** 撤销删除（#268）：文档、分块、随之作废的事实原路复活 */
+  restoreDocument: (id: string) =>
+    request<{ ok: boolean }>(`/api/v1/documents/${id}/restore`, { method: "POST" }),
 
   search: (kbId: string, q: string) =>
     request<{ results: SearchResult[] }>(`/api/v1/kbs/${kbId}/search`, {
@@ -1789,13 +1812,17 @@ export const api = {
     kbId: string,
     violationId: string,
     resolution: ViolationResolution,
-    closeAt?: string,
+    opts: { closeAt?: string; factId?: string } = {},
   ) =>
     request<{ ok: boolean }>(
       `/api/v1/kbs/${kbId}/review/violations/${violationId}`,
       {
         method: "POST",
-        body: JSON.stringify({ resolution, close_at: closeAt ?? null }),
+        body: JSON.stringify({
+          resolution,
+          close_at: opts.closeAt ?? null,
+          fact_id: opts.factId ?? null,
+        }),
       },
     ),
   confirmFact: (kbId: string, factId: string) =>

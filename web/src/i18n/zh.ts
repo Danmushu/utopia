@@ -24,7 +24,7 @@ export const zh: Strings = {
     bad_display_name: "显示名需要 1–64 个字符。",
     wrong_password: "当前密码不对。",
     registration_closed: "本部署已关闭自助注册——请找管理员开通账户。",
-    no_chat_model: "还没有配置对话模型。到「设置 → 模型」里配一个。",
+    no_chat_model: "还没有配置对话模型。到「管理 → 模型」里配一个。",
     bad_upload: "这次上传读不出来。",
     upload_read_failed: "文件没能读完。",
     no_files: "没有附带文件。",
@@ -59,7 +59,7 @@ export const zh: Strings = {
     no_data_sources: "这个知识库没有挂载任何数据库。",
     // 授权是逐工作区的（0014）：源没授权给本库所属的工作区
     source_not_granted:
-      "这个数据源没有授权给本工作区。请部署管理员在「系统设置 → 数据源」里授权。",
+      "这个数据源没有授权给本工作区。请部署管理员在「管理 → 数据源」里授权。",
     memory_source_permanent: "「记忆」是知识库自带的来源，会一直在。",
     source_name_required: "给这个来源起个名字。",
     bad_cron: "这个 cron 表达式解析不了。",
@@ -186,18 +186,20 @@ export const zh: Strings = {
       },
       "llm.unreachable": {
         title: "模型端点没有给出可用的回答",
-        hint: "抽取与向量化已停摆。去系统设置里检查端点地址。",
+        hint: "抽取与向量化已停摆。去「管理 → 模型」里检查端点地址。",
       },
       "llm.rate_limited": {
         title: "模型端点在限流",
-        hint: "退避重试之后仍然被挡回来，有文档因此缺了事实。去系统设置里降低模型并发，或者把账号配额升一档。",
+        hint: "退避重试之后仍然被挡回来，有文档因此缺了事实。去「管理」里降低模型并发，或者把账号配额升一档。",
       },
       "llm.out_of_credit": {
         title: "模型账号付不起请求",
-        hint: "抽取与向量化已停摆，而且不会自己恢复。去给账号充值，或者在系统设置里换一个能用的端点。",
+        hint: "抽取与向量化已停摆，而且不会自己恢复。去给账号充值，或者在「管理 → 模型」里换一个能用的端点。",
       },
     } as Record<string, { title: string; hint: string } | undefined>,
     unknownKind: (kind: string) => kind,
+    runAgain: "再跑一遍",
+    requeued: (n: number) => `${n} 个任务回到队列`,
   },
 
   kbScope: {
@@ -282,7 +284,7 @@ export const zh: Strings = {
         {
           h: "留存与删除",
           body: [
-            "删除一篇文档会移除它的存储内容与索引条目。已经抽取进知识图谱的事实连同其出处仍会保留，直到在「审阅」中被移除。删除一个知识库会永久移除它的文档、图谱与来源。",
+            "删除一篇文档会把它移出知识库，并让只以它为出处的事实一并失效；另有出处的事实保留，出处照旧。内容会留着以便撤销：删除可以恢复，重新上传同一份文件也会恢复它。删除一个知识库会永久移除它的文档、图谱与来源。",
           ],
         },
         {
@@ -334,6 +336,10 @@ export const zh: Strings = {
     },
   },
   library: {
+    deletedWithFacts: (n: number) =>
+      n === 0 ? "文档已删除" : `文档已删除 · 随之失效 ${n} 条事实`,
+    undo: "撤销",
+    restored: "文档已恢复",
     title: "文库",
     upload: "上传文件",
     uploading: "上传中…",
@@ -571,8 +577,8 @@ export const zh: Strings = {
     cleanupTitle: "删除缺失的文档",
     cleanupHint: (n: number, name: string) =>
       `「${name}」中有 ${n} 篇文档已不在来源里。` +
-      "删除会永久移除它们的内容与检索条目。" +
-      "已经抽取进图谱的事实连同出处仍会保留。",
+      "删除会把它们移出知识库，只以它们为出处的事实随之失效；" +
+      "内容会留着，删掉的文档可以恢复。",
     cleanupConfirm: "删除它们",
     deleteSourceTitle: "删除这个来源",
     deleteSourceBody: (name: string) =>
@@ -590,7 +596,7 @@ export const zh: Strings = {
     greeting: "问问 Utopia 记得什么",
     emptyTitle: "对话",
     emptyBody:
-      "与你的知识库对话——带引用的回答、关于时间的提问，而且它会记住。\n请先在「文库」上传文档，并在「设置」里配置模型。",
+      "与你的知识库对话——带引用的回答、关于时间的提问，而且它会记住。\n请先在「文库」上传文档，并在「管理 → 模型」里配置模型。",
     placeholder: "问点什么…",
     composerHint: "回车发送 · Shift+回车 换行",
     scopeLabel: "知识库",
@@ -632,7 +638,10 @@ export const zh: Strings = {
     searchInSubgraph: "在子图中搜索…",
     backToOverview: "← 全图",
     emptyBody:
-      "图谱是空的。请先在「设置」里配置对话模型，然后在「文库」中上传文档——实体与关系会被自动抽取。",
+      "图谱是空的。请管理员先配置对话模型，然后在「文库」中上传文档——实体与关系会被自动抽取。",
+    emptyBodyAdmin:
+      "图谱是空的。请先在「管理 → 模型」里配置对话模型，然后在「文库」中上传文档——实体与关系会被自动抽取。",
+    emptyOpenModels: "打开「管理 → 模型」",
     facts: "条事实",
     noFacts: "这个实体还没有事实",
     confidence: "置信度",
@@ -647,6 +656,8 @@ export const zh: Strings = {
     sectionRef: (filename: string, seq: number) =>
       `${filename} · 第 ${seq} 段 →`,
     fromVersion: (v: number) => `v${v}`,
+    sourceDeleted: "出处已删",
+    sourceDeletedHint: "这句引文所在的文档已被删除。事实还在，因为它另有出处。",
     staleEvidenceHint:
       "这条证据来自文档的较早版本。文档此后已更新；事实本身不受影响。",
     staleFactChip: "未确认",
@@ -773,7 +784,7 @@ export const zh: Strings = {
     ongoing: "至今",
   },
   settings: {
-    title: "系统设置",
+    title: "管理",
     tabModels: "模型",
     tabMembers: "用户",
     tabKbs: "知识库",
@@ -1237,6 +1248,8 @@ export const zh: Strings = {
     violationVia: (p: string) => `依据 ${p}`,
     violationPath: (n: number) => `环上 ${n} 条事实`,
     retractFact: "数据错了",
+    retractThis: "撤这条",
+    retractThisHint: "把这条事实撤出图谱，另一条不动。",
     relaxAxiom: "公理错了",
     acceptBoth: "两边都对",
     runCheck: "跑一遍检查",
@@ -1317,6 +1330,9 @@ export const zh: Strings = {
     inferEvery: "每隔",
     minutes: "分钟重推",
     lastInference: (when: string) => `上次 ${when}`,
+    failedJobs: (n: number) => `${n} 个失败的任务`,
+    requeue: "再跑一遍",
+    requeued: (n: number) => `${n} 个任务回到队列`,
     ontologyLang: "本体的语言",
     ontologyLangNote:
       "类与关系的描述用哪种语言写。它们会被原样送进抽取提示词，" +
