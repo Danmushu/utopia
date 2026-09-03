@@ -88,6 +88,11 @@ const searchRoute = createRoute({
   getParentRoute: () => kbRoute,
   path: "search",
   component: Search,
+  // 搜索词是「你在看什么」，不是「你怎么看」——刷新、返回、分享都靠它重建
+  // （同 doc 的 chunk、review 的 queue）。分页留在本地，同图谱的档位
+  validateSearch: (search: Record<string, unknown>): { q?: string } => ({
+    q: typeof search.q === "string" ? search.q : undefined,
+  }),
 });
 
 const graphRoute = createRoute({
@@ -143,6 +148,13 @@ const mappingsRoute = createRoute({
 const reviewRoute = createRoute({
   getParentRoute: () => kbRoute,
   path: "review",
+  // 从实体面板的争议 chip 跳过来：落到对应那一档，并点亮那一张卡（0017 §3）
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { queue?: string; item?: string } => ({
+    queue: typeof search.queue === "string" ? search.queue : undefined,
+    item: typeof search.item === "string" ? search.item : undefined,
+  }),
   component: Review,
 });
 

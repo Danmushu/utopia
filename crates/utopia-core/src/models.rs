@@ -137,6 +137,95 @@ pub struct Source {
     pub created_at: DateTime<Utc>,
 }
 
+/// 来源配置里**用来鉴权**的那几个键。凭据只进不出：列表与创建 / 更新的响应都剔掉，
+/// 更新时客户端没传或传空串就保留库里的原值，审计里也不落。
+///
+/// **一张表，四处共用。** 此前那条规矩只对 `auth_header` 一个键成立，而对象存储、
+/// WebDAV、Notion 各自的密钥原样发给了每一个 Viewer（#246）。加连接器时**先加这里**，
+/// 再写读它的代码。`username` / `account_name` / `access_key_id` 这类是身份标识，
+/// 单独拿到鉴不了权，留着让界面显示得出「这是哪个账号」。
+pub const SOURCE_SECRET_KEYS: &[&str] = &[
+    "auth_header",
+    "token",
+    "password",
+    "secret_access_key",
+    "account_key",
+    "service_account_key",
+];
+
+impl Source {
+    /// 剔掉凭据后的这条来源——任何要回给客户端的 `Source` 都从这里过
+    pub fn without_secrets(mut self) -> Self {
+        if let Some(obj) = self.config.as_object_mut() {
+            for key in SOURCE_SECRET_KEYS {
+                obj.remove(*key);
+            }
+        }
+        self
+    }
+}
+
+/// 来源的种类。**一处定义，三处消费**：创建时的白名单、同步时的分派（按枚举穷举匹配，
+/// 加一种就得决定它怎么同步）、前端的下拉框（`web/src/sourceKinds.ts`，由
+/// `utopia-store` 的测试对表）。
+///
+/// 此前后端两张手写清单各自演进：五种连接器加了同步分支、进了界面，却没进创建的
+/// 白名单，界面上选得到、建的时候报「kind must be one of…」（#247）。变体顺序就是
+/// 对话框里的顺序；字符串形式由 strum 按 snake_case 生成，不再手写
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::EnumIter,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum SourceKind {
+    Folder,
+    Url,
+    Rss,
+    GithubIssues,
+    JiraIssues,
+    S3,
+    AzureBlob,
+    Gcs,
+    Webdav,
+    Notion,
+    Api,
+    Custom,
+    /// 每个库自带的记忆来源，不可建不可删（0015）
+    Memory,
+    /// 老数据里 `sources.kind` 的默认值，没有对应的界面
+    Upload,
+}
+
+impl SourceKind {
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        s.parse().ok()
+    }
+
+    pub fn all() -> impl Iterator<Item = Self> {
+        <Self as strum::IntoEnumIterator>::iter()
+    }
+
+    /// 人能从界面建的：`memory` 与 `upload` 之外的全部
+    pub fn creatable_by_hand(self) -> bool {
+        !matches!(self, Self::Memory | Self::Upload)
+    }
+
+    pub fn creatable() -> impl Iterator<Item = Self> {
+        Self::all().filter(|k| k.creatable_by_hand())
+    }
+}
+
 /// 来源同步运行记录（渠道审计历史）。
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct SyncRun {
@@ -513,6 +602,13 @@ pub struct GraphEdge {
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_to: Option<DateTime<Utc>>,
     pub confidence: f32,
+    /// 有争议（0017 §3）：有一条 open 的公理违规或时态冲突指着它。整条边画成
+    /// 警戒色——环在节点上、边还是灰的，余光分不出来
+    pub contested: bool,
+    /// 幽灵边（0017 §3）：一条**没有落地**的派生——推出来了却撞上断言。`id` 是那条
+    /// `derived_contradiction` 违规的 id，不是任何事实；`derived` 同时为 true，
+    /// 所以它跟着派生开关走
+    pub blocked: bool,
 }
 
 /// 实体详情页的事实行（时间线）。
@@ -549,6 +645,10 @@ pub struct EntityFact {
     pub corrected: bool,
     /// 证据集合里最新的文档时间——开放事实的"最后确认时间"（时效性透明化）
     pub last_evidence_time: Option<DateTime<Utc>>,
+    /// 有争议（0017 §3）：`{ kind, ref_id, derived? }`——哪一种（违规的 kind，或
+    /// `temporal_conflict`）、Review 里那一项的 id、派生撞断言时推出来的那句话。
+    /// 一条只报最新的一处；行**不压暗**，断言仍然活着
+    pub contested: Option<serde_json::Value>,
 }
 
 /// 实体的一次认知变更（记录时间轴上的事件，与 EntityFact 的有效时间轴正交）。
@@ -867,10 +967,10 @@ pub struct ConceptMapping {
 ///
 /// **两条事实都展开成 主-谓-宾 文本**：Review 页要让人一眼看出矛盾在哪，
 /// 而两个 UUID 看不出任何东西。自反那一类两条相同——它就是一条事实。
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AxiomViolation {
     pub id: Uuid,
-    /// self_loop | asymmetry | cycle | functional
+    /// self_loop | asymmetry | cycle | functional | signature | derived_contradiction
     pub kind: String,
     /// 判据来自哪条关系。人若判「公理写错了」，从这里进本体去改
     pub predicate: Option<String>,
@@ -881,6 +981,22 @@ pub struct AxiomViolation {
     /// 环的长度（含首尾）。其余三类为 0——前端据此决定要不要显示「查看路径」
     pub path_len: i32,
     pub detected_at: chrono::DateTime<chrono::Utc>,
+    /// `derived_contradiction` 独有（0017）：推出来的那条三元组——它没有落库，
+    /// 只能在这里写出来。字段见 `reasoning::run`。其余种类是 `{}`
+    pub detail: serde_json::Value,
+    /// 审核线索（0017 §2）：`stale`（旧断言没写结束日期）、`duplicate`（有同名
+    /// 实体）、`unsure`（抽取置信度低）。只给一条，没有就空
+    pub hint: Option<String>,
+    /// 环上的每一条事实，按顺序（其余种类为空）。**逐条给 id**：撤事实要说撤哪条，
+    /// 而环上哪条错了只有人看了才知道（#202）
+    pub path: Vec<ViolationFact>,
+}
+
+/// 违规里的一条事实：id 与三元组文本
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViolationFact {
+    pub id: Uuid,
+    pub text: String,
 }
 
 /// 本体自己的一处自相矛盾（见 `ontology_defects`）。
@@ -891,8 +1007,11 @@ pub struct AxiomViolation {
 pub struct OntologyDefect {
     pub id: Uuid,
     /// symmetric_and_asymmetric | transitive_and_functional | subclass_cycle
-    /// | disjoint_with_ancestor | inherits_disjoint
+    /// | disjoint_with_ancestor | inherits_disjoint | inverse_of_itself
+    /// | inverse_not_mutual | sub_property_cycle | rules_disagree
     pub kind: String,
+    /// `rules_disagree` 独有（0017）：哪两条规则、撞在哪条公理上、几对、几个例子
+    pub detail: serde_json::Value,
     /// 出问题那个对象的标签（类或谓词）。查不到就是它已经被删了
     pub subject_label: Option<String>,
     /// 另一方：互斥的那个类
@@ -922,6 +1041,61 @@ pub struct DerivedFactView {
     pub derived_at: DateTime<Utc>,
     /// 直接前提，按推导顺序展开成三元组文本
     pub premises: Vec<String>,
+}
+
+/// 一条**没有落地**的派生（0017 §3）：推出来了，撞上一条断言，拦在图外。
+///
+/// 它没有 id——落库的才有。这里用那条 `derived_contradiction` 违规的 id 指它，
+/// 面板上的「没落地的」一档与图上的幽灵边都靠这个 id 对上 Review 里的卡片。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct BlockedDerivation {
+    pub violation_id: Uuid,
+    pub subject_id: Uuid,
+    pub subject: String,
+    pub object_id: Uuid,
+    pub object: String,
+    pub predicate: String,
+    pub rule: String,
+    /// 声明所在的谓词
+    pub via_label: String,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+    /// 挡住它的那条断言，与它的三元组文本
+    pub against_fact: Uuid,
+    pub against_text: String,
+    /// 前提事实 id，按推导顺序——证明链从这里展开
+    pub premises: Vec<Uuid>,
+}
+
+/// 证明的一步：一条断言前提，连同它的证据（0002 R2）。
+///
+/// 前提一律是断言（`fact_derivations` 不记派生），所以证明是一条链而不是一棵树：
+/// 派生 → 按 `seq` 排好的断言 → 每条断言的原句。叶子就是 chunk。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProofStep {
+    pub seq: i32,
+    pub fact_id: Uuid,
+    pub subject_id: Uuid,
+    pub subject: String,
+    pub predicate_id: Option<Uuid>,
+    /// 本体里的关系名；空谓词事实（0010）不参与推导，这里理论上恒有值，
+    /// 留 Option 是不在读路径上撒谎
+    pub predicate: Option<String>,
+    pub object_id: Option<Uuid>,
+    pub object: Option<String>,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+    pub confidence: f32,
+    /// 这条前提后来被撤了。派生随之失效，但证明还要读得出「当时靠的是什么」
+    pub retracted: bool,
+    pub evidence: Vec<EvidenceView>,
+}
+
+/// 一条派生事实的完整证明：它本身，加上按顺序展开到原句的前提。
+#[derive(Debug, Clone, Serialize)]
+pub struct Proof {
+    pub derived: DerivedFactView,
+    pub steps: Vec<ProofStep>,
 }
 
 /// 审核队列各档的**真实条数**。

@@ -6,6 +6,7 @@ mod datasource_routes;
 mod documents_routes;
 mod events_routes;
 mod graph_routes;
+mod jobs_routes;
 mod kbs;
 mod mapping_routes;
 mod mcp;
@@ -86,6 +87,10 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         )
         .route("/kbs/{id}/members", get(kbs::members))
         .route("/kbs/{id}/audit", get(kbs::audit_log))
+        // 失败任务回队列（#216）：库内给 Editor，全局给管理员
+        .route("/kbs/{id}/jobs/failed", get(jobs_routes::failed_in_kb))
+        .route("/kbs/{id}/jobs/requeue", post(jobs_routes::requeue_in_kb))
+        .route("/jobs/requeue", post(jobs_routes::requeue_all))
         .route(
             "/kbs/{id}/members/{user_id}",
             axum::routing::put(kbs::set_member).delete(kbs::remove_member),
@@ -289,6 +294,16 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         .route(
             "/kbs/{id}/facts/{fact_id}/evidence",
             get(graph_routes::fact_evidence),
+        )
+        // 派生事实的证明（0002 R2）：前提按顺序展开到原句
+        .route(
+            "/kbs/{id}/derived/{derived_id}/proof",
+            get(graph_routes::derived_proof),
+        )
+        // 没落地的派生的证明（0017 §3）：前提在违规的 path 里
+        .route(
+            "/kbs/{id}/violations/{violation_id}/proof",
+            get(graph_routes::blocked_proof),
         )
         .route("/kbs/{id}/events", get(events_routes::kb_events))
         .route(

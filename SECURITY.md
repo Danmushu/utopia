@@ -45,5 +45,7 @@ source.
 
 ## Reporting a vulnerability
 
-Open an issue. If it involves exploitable detail, start with the minimum needed to reproduce
-and we will follow up privately.
+Email **security@deeplethe.com** rather than opening a public issue. Include the affected
+version or commit, the endpoint or component, and steps to reproduce. You will get an
+acknowledgement within a few days, and the release that carries the fix names you unless you
+ask otherwise.

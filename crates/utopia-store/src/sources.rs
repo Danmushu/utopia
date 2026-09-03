@@ -2,28 +2,22 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use utopia_core::models::{Role, Source, SourceView, SyncRun};
+use utopia_core::models::{Role, Source, SourceKind, SourceView, SyncRun, SOURCE_SECRET_KEYS};
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
 /// folder = 纯容器（上传/拖拽入内，无同步语义）；url/rss = 拉取型；api = 推送型。
 /// 本机目录监听（watch_folder）已否决——自部署用户看不到服务器磁盘；
-/// 未来的 watch 形态是对象存储/网盘（P5 连接器，与 BlobStore 接缝配套）。
+/// 对象存储 / WebDAV / Notion 是它的替代形态（0013）。
 /// custom = 自定义拉取器：任何实现 Utopia ingest 接口的 URL（返回 items JSON）即可定时摄取。
 /// github_issues / jira_issues = 工单：一张工单连同它的状态变更史成为一篇文档。
 ///
-/// **改这里就得改前端那份清单**（`Library.tsx` 的建来源对话框与 `api.ts` 的
-/// `SourceView["kind"]`）。两处对不上时的症状是：界面上选得到、建的时候报
-/// 「kind must be one of…」——单元测试与 tsc 都看不见，只有端到端会撞上。
-pub const KINDS: &[&str] = &[
-    "folder",
-    "url",
-    "rss",
-    "api",
-    "custom",
-    "github_issues",
-    "jira_issues",
-];
+/// 种类的清单**不在这里写**：`SourceKind`（utopia-core）一个枚举出全部——创建的白名单、
+/// 同步的分派、前端的下拉框（有测试对表）。从前这里有一张手写的 `KINDS`，五种连接器
+/// 加了同步却没进这张表，界面上选得到、建不出来（#247）
+pub fn creatable_kinds() -> Vec<&'static str> {
+    SourceKind::creatable().map(|k| k.as_str()).collect()
+}
 
 /// 校验并规范化标准 5 段 cron 表达式（内部用 cron crate 的 6 段：补秒位）。
 pub fn validate_cron(expr: &str) -> AppResult<String> {
@@ -55,9 +49,11 @@ fn cron_next_after(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
 }
 
 pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<SourceView>> {
-    // config 剔除 auth_header：自定义拉取器的凭据不下发给任何客户端
+    // config 剔掉凭据：列表给 Viewer 看，哪一种连接器的密钥都不下发。
+    // 键在 `SOURCE_SECRET_KEYS` 一张表上——从前这里只减 `auth_header`，五种连接器
+    // 的密钥就这么漏出去的（#246）
     let rows: Vec<SourceView> = sqlx::query_as(
-        "SELECT s.id, s.kind, s.name, s.config - 'auth_header' AS config, s.icon,
+        "SELECT s.id, s.kind, s.name, s.config - $2::text[] AS config, s.icon,
                 s.sync_interval_minutes, s.sync_cron,
                 s.last_sync_at, s.last_sync_status, s.last_sync_error, s.last_sync_added,
                 (SELECT count(*) FROM documents d WHERE d.source_id = s.id) AS doc_count,
@@ -66,6 +62,7 @@ pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<SourceView>> {
          FROM sources s WHERE s.kb_id = $1 ORDER BY s.created_at",
     )
     .bind(kb_id)
+    .bind(SOURCE_SECRET_KEYS)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -90,10 +87,10 @@ pub async fn create(
     sync_interval_minutes: Option<i32>,
     sync_cron: Option<&str>,
 ) -> AppResult<Source> {
-    if !KINDS.contains(&kind) {
+    if !SourceKind::parse(kind).is_some_and(|k| k.creatable_by_hand()) {
         return Err(AppError::Validation(format!(
             "kind must be one of: {}",
-            KINDS.join(", ")
+            creatable_kinds().join(", ")
         )));
     }
     if name.trim().is_empty() {

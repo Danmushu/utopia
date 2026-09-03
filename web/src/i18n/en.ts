@@ -220,6 +220,10 @@ export const en = {
     } as Record<string, { title: string; hint: string } | undefined>,
     // 没见过的 kind 也要能显示：新告警源上线时前端可能还没更新
     unknownKind: (kind: string) => kind,
+    /** 修好之后接着跑（#216） */
+    runAgain: "Run those again",
+    requeued: (n: number) =>
+      n === 1 ? "1 job back in the queue" : `${n} jobs back in the queue`,
   },
 
   kbScope: {
@@ -732,6 +736,23 @@ export const en = {
     derivedHint:
       "Edges no one asserted — the engine worked them out from axioms your ontology declares. Each one shows the premises it came from.",
     derivedNoProof: "The premises are gone.",
+    /* 争议（0017 §3） */
+    contestedChip: "disputed",
+    contestedHint: (kind: string, derived: string | null) =>
+      kind === "derived_contradiction"
+        ? `A derivation contradicts this assertion${derived ? `: ${derived}` : ""}. Open it under Review.`
+        : kind === "temporal_conflict"
+          ? "A newer assertion conflicts with this one in time. Open it under Review."
+          : "This assertion breaks an axiom the ontology declares. Open it under Review.",
+    blockedTitle: "Did not land",
+    blockedHint:
+      "The engine could draw these edges; an assertion stood in the way. They show on the graph as ghost edges.",
+    blockedBy: (t: string) => `blocked by ${t}`,
+    blockedReview: "Review",
+    /** 证明链（0002 R2）：每一步是一条断言前提，展开到原句 */
+    proofStep: (n: number) => `Step ${n}`,
+    proofRetracted: "since retracted",
+    proofLoading: "Tracing the proof…",
     derivedPanel: "Inference",
     derivedRunAsk: "Re-run inference for the whole base?",
     derivedRunGo: "Run",
@@ -872,7 +893,13 @@ export const en = {
         "Read-only database connections for asking questions about your data in Chat. " +
         "Register connections here; each knowledge base mounts the ones it may query.",
       name: "Name",
-      connString: "Connection string (postgres://user:pass@host:5432/db)",
+      connString: "Connection string — the scheme picks the engine",
+      // 四种写法各一行；令牌放 password 位，Databricks 的路径就是控制台里的 httpPath
+      connSchemes:
+        "postgres://user:pass@host:5432/db\n" +
+        "trino://user[:pass]@host:8080/catalog[/schema]   (Iceberg, Delta Lake, Hive)\n" +
+        "databricks://:TOKEN@host/sql/1.0/warehouses/ID?catalog=main\n" +
+        "snowflake://:TOKEN@account.snowflakecomputing.com/DB/SCHEMA?warehouse=WH",
       add: "Add data source",
       test: "Test",
       testOk: "Connected",
@@ -1299,6 +1326,16 @@ export const en = {
     defectInverseSelf: "Its own inverse — say symmetric instead",
     defectInverseNotMutual: "The inverse does not point back",
     defectSubPropertyCycle: "subPropertyOf runs in a circle",
+    defectRulesDisagree: "Two rules produce contradicting derivations",
+    rulesDisagreeCount: (n: number) =>
+      `${n} pair(s) of derivations held back until this is settled`,
+    rulesDisagreeRule: (
+      a: string,
+      va: string,
+      b: string,
+      vb: string,
+      axiom: string,
+    ) => `${a} on ${va} with ${b} on ${vb}, against ${axiom}`,
     defectNeverInstantiable: "no instance can ever satisfy it",
     defectFixed: "I fixed the ontology",
     defectAccepted: "Leave it",
@@ -1321,9 +1358,30 @@ export const en = {
     /** 签名违规（#190 / #196）：一条事实的主语或宾语落在谓词声明的类型之外——
      *  抽取时会掰正，采纳与合并这两条路从前绕过了检查 */
     violationSignature: "Subject or object outside the declared types",
+    /** 0017：派生撞上断言。卡片是一次审核，线索指向上游的错 */
+    violationDerived: "A derivation contradicts an assertion",
+    derivedLine: (s: string, p: string, o: string) =>
+      `Derived: ${s} · ${p} · ${o}`,
+    derivedBy: (rule: string, via: string) => `by ${rule} on ${via}`,
+    assertedLine: (t: string) => `Asserted: ${t}`,
+    hintStale:
+      "The assertion has no end date and the derivation starts later. It may simply have ended.",
+    hintDuplicate:
+      "Two entities share this name. They may be the same one.",
+    hintUnsure:
+      "The assertion was extracted with low confidence. Read its sentence.",
+    hintReadBoth: "Read both sentences and decide which one is wrong.",
+    closeAssertion: "Give the assertion an end date",
+    retractAssertion: "Retract the assertion",
+    seeDuplicates: "See duplicates",
+    openOntology: "Open the ontology",
+    letBothStand: "Let both stand",
     violationVia: (p: string) => `via ${p}`,
     violationPath: (n: number) => `${n} facts in the cycle`,
     retractFact: "Data is wrong",
+    /** 双事实与环上的违规：撤具体哪一条（#202） */
+    retractThis: "Retract",
+    retractThisHint: "Withdraw this fact from the graph; the other one stays.",
     relaxAxiom: "Axiom is wrong",
     acceptBoth: "Both are right",
     runCheck: "Run check",
@@ -1412,6 +1470,10 @@ export const en = {
     inferEvery: "Re-derive every",
     minutes: "minutes",
     lastInference: (when: string) => `last run ${when}`,
+    failedJobs: (n: number) => (n === 1 ? "1 failed job" : `${n} failed jobs`),
+    requeue: "Run again",
+    requeued: (n: number) =>
+      n === 1 ? "1 job back in the queue" : `${n} jobs back in the queue`,
     /* 语料语言。措辞要把"这不是界面语言"讲清楚，否则一定有人当成界面开关 */
     ontologyLang: "Language of this ontology",
     ontologyLangNote:

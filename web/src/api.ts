@@ -1,3 +1,4 @@
+import type { SourceKind } from "./sourceKinds";
 import { S, lang } from "./i18n";
 
 export class ApiError extends Error {
@@ -179,21 +180,7 @@ export interface ExtractionDrop {
 
 export interface SourceView {
   id: string;
-  kind:
-    | "folder"
-    | "url"
-    | "rss"
-    | "api"
-    | "custom"
-    | "github_issues"
-    | "jira_issues"
-    | "s3"
-    | "azure_blob"
-    | "gcs"
-    | "webdav"
-    | "notion"
-    | "memory"
-    | "upload";
+  kind: SourceKind;
   name: string;
   config: {
     urls?: string[];
@@ -324,6 +311,47 @@ export interface DerivedFact {
   premises: string[];
 }
 
+/** 一条**没有落地**的派生（0017 §3）：推出来了，撞上一条断言，拦在图外。
+ *  没有自己的 id，用那条违规的 id 指它——面板、幽灵边、Review 卡片三处靠它对上 */
+export interface BlockedDerivation {
+  violation_id: string;
+  subject_id: string;
+  subject: string;
+  object_id: string;
+  object: string;
+  predicate: string;
+  rule: string;
+  via_label: string;
+  valid_from: string | null;
+  valid_to: string | null;
+  against_fact: string;
+  against_text: string;
+  premises: string[];
+}
+
+/** 证明的一步：一条断言前提，带它的证据。前提一律是断言，所以证明是链不是树 */
+export interface ProofStep {
+  seq: number;
+  fact_id: string;
+  subject_id: string;
+  subject: string;
+  predicate_id: string | null;
+  predicate: string | null;
+  object_id: string | null;
+  object: string | null;
+  valid_from: string | null;
+  valid_to: string | null;
+  confidence: number;
+  /** 这条前提后来被撤了；派生随之失效，证明仍要读得出当时靠的是什么 */
+  retracted: boolean;
+  evidence: Evidence[];
+}
+
+export interface Proof {
+  derived: DerivedFact;
+  steps: ProofStep[];
+}
+
 /** 审核页的分档。**与服务端的 queue 参数是同一组字面量**——拼错会拿到
  *  一个明确的 unknown_queue 错误，而不是悄悄的空列表。 */
 export type ReviewQueue =
@@ -450,9 +478,33 @@ export interface MappingRevision {
   changed_at: string;
 }
 /** 一处公理违规（0002 R0）。判据来自本体自己声明的公理，没声明就不报 */
+/** derived_contradiction 独有（0017）：推出来的那条三元组——它没有落库，
+ *  只能在这里写出来。其它种类是 `{}` */
+export interface ViolationDetail {
+  axiom?: "functional" | "asymmetry" | "self_loop";
+  rule?: "transitive" | "symmetric" | "inverse" | "sub_property";
+  via_label?: string;
+  subject?: string;
+  predicate?: string;
+  object?: string;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  premises?: string[];
+}
+export type ViolationResolution =
+  | "fact_retracted"
+  | "fact_closed"
+  | "axiom_relaxed"
+  | "accepted";
 export interface AxiomViolation {
   id: string;
-  kind: "self_loop" | "asymmetry" | "cycle" | "functional";
+  kind:
+    | "self_loop"
+    | "asymmetry"
+    | "cycle"
+    | "functional"
+    | "signature"
+    | "derived_contradiction";
   /** 判据来自哪条关系。判「公理写错了」时从这里进本体去改 */
   predicate: string | null;
   left_fact: string;
@@ -463,6 +515,12 @@ export interface AxiomViolation {
   /** 环的长度；其余三类为 0 */
   path_len: number;
   detected_at: string;
+  detail: ViolationDetail;
+  /** 审核线索（0017 §2），一次只给一条：旧断言没写结束日期、有同名实体、
+   *  抽取置信度低。没有就空 */
+  hint: "stale" | "duplicate" | "unsure" | null;
+  /** 环上的每一条事实，按顺序；其余种类为空。撤事实要指名撤哪条（#202） */
+  path: { id: string; text: string }[];
 }
 /** 本体自己的一处自相矛盾。**与 AxiomViolation 不是一回事**：那个说
  *  「事实与定义抵触」，这个说「定义自己站不住」，后者更根本 */
@@ -477,11 +535,27 @@ export interface OntologyDefect {
     // 0017 加的三类：都在谓词上，前两类关于逆，第三类是子属性成环
     | "inverse_of_itself"
     | "inverse_not_mutual"
-    | "sub_property_cycle";
+    | "sub_property_cycle"
+    // 0017：两条规则加在一起产出互斥的派生，按规则对聚合报一次
+    | "rules_disagree";
   subject_label: string | null;
   other_label: string | null;
   path_labels: string[];
   detected_at: string;
+  detail: DefectDetail;
+}
+/** rules_disagree 独有：哪两条规则、撞在哪条公理上、几对、几个例子 */
+export interface DefectDetail {
+  count?: number;
+  rules?: {
+    rule_a: string;
+    via_a: string;
+    rule_b: string;
+    via_b: string;
+    axiom: string;
+    count: number;
+    examples: [string, string][];
+  }[];
 }
 export interface FactReviewItem {
   id: string;
@@ -579,6 +653,11 @@ export interface GraphEdge {
   valid_from: string | null;
   valid_to: string | null;
   confidence: number;
+  /** 有争议（0017 §3）：有一条 open 的公理违规或时态冲突指着它。整条边画成警戒色 */
+  contested: boolean;
+  /** 幽灵边（0017 §3）：没落地的派生。`id` 是那条 `derived_contradiction` 违规的 id；
+   *  `derived` 同时为 true，跟着派生开关走。点它打开主语的面板 */
+  blocked: boolean;
 }
 
 export interface EntityFact {
@@ -606,6 +685,13 @@ export interface EntityFact {
   stale: boolean;
   /** 修正行：区间闭合来自引擎对账/人工裁决而非抽取原文 */
   corrected: boolean;
+  /** 有争议（0017 §3）：哪一种、Review 里那一项的 id、派生撞断言时推出来的那句话。
+   *  行不压暗——断言仍然活着 */
+  contested: {
+    kind: string;
+    ref_id: string;
+    derived?: string | null;
+  } | null;
   /** 证据集合里最新的文档时间（开放事实的"最后确认时间"） */
   last_evidence_time: string | null;
 }
@@ -897,6 +983,17 @@ export const api = {
     );
   },
   alertsUnread: () => request<{ unread: number }>("/api/v1/alerts/unread"),
+  /** 失败任务回队列（#216）。库内一条、全局一条（管理员）；范围可按种类与失败时间收窄 */
+  failedJobs: (kbId: string) =>
+    request<{ failed: number }>(`/api/v1/kbs/${kbId}/jobs/failed`),
+  requeueJobs: (
+    kbId: string | null,
+    body: { kind?: string; failed_since?: string } = {},
+  ) =>
+    request<{ requeued: number }>(
+      kbId ? `/api/v1/kbs/${kbId}/jobs/requeue` : "/api/v1/jobs/requeue",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   alertReadGroup: (g: {
     kb_id: string | null;
     kind: string;
@@ -1294,6 +1391,8 @@ export const api = {
       /** 推出来的那些**单独一个键**，不掺进 facts：混在同一个列表里，
        *  用户看不出「文档里写的」和「引擎推的」的区别 */
       derived: DerivedFact[];
+      /** 没落地的派生（0017 §3）：连 `derived_facts` 都不在，所以也单独一个键 */
+      blocked: BlockedDerivation[];
       /** 同名的其他实体。**打开面板就给**——合并入口要长在能看见同名的地方，
        *  而不是藏在「改一次名」之后 */
       same_name: GraphNode[];
@@ -1317,6 +1416,17 @@ export const api = {
   factEvidence: (kbId: string, factId: string) =>
     request<{ evidence: Evidence[] }>(
       `/api/v1/kbs/${kbId}/facts/${factId}/evidence`,
+    ),
+  /** 一条派生事实的证明（0002 R2）：前提按推导顺序，每条带证据，一路到原句。
+   *  派生已失效时回 null——不是错误 */
+  derivedProof: (kbId: string, derivedId: string) =>
+    request<{ proof: Proof | null }>(
+      `/api/v1/kbs/${kbId}/derived/${derivedId}/proof`,
+    ),
+  /** 没落地的派生的证明链（0017 §3）：前提在违规的 path 里 */
+  blockedProof: (kbId: string, violationId: string) =>
+    request<{ steps: ProofStep[] | null }>(
+      `/api/v1/kbs/${kbId}/violations/${violationId}/proof`,
     ),
   documentDetail: (id: string) =>
     request<{ document: Doc; chunks: ChunkFull[] }>(`/api/v1/documents/${id}`),
@@ -1691,11 +1801,19 @@ export const api = {
   decideViolation: (
     kbId: string,
     violationId: string,
-    resolution: "fact_retracted" | "axiom_relaxed" | "accepted",
+    resolution: ViolationResolution,
+    opts: { closeAt?: string; factId?: string } = {},
   ) =>
     request<{ ok: boolean }>(
       `/api/v1/kbs/${kbId}/review/violations/${violationId}`,
-      { method: "POST", body: JSON.stringify({ resolution }) },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          resolution,
+          close_at: opts.closeAt ?? null,
+          fact_id: opts.factId ?? null,
+        }),
+      },
     ),
   confirmFact: (kbId: string, factId: string) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/facts/${factId}/confirm`, {
