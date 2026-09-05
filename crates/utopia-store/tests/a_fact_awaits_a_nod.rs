@@ -16,6 +16,8 @@ struct Fixture {
     shanghai: Uuid,
     hq: Uuid,
     chunk: Uuid,
+    user: Uuid,
+    token: Uuid,
 }
 
 async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
@@ -44,6 +46,26 @@ async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(kb)
     .execute(pool)
     .await?;
+    let (user, token) = (Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO users (id, org_id, email, password_hash, display_name)
+         VALUES ($1, $2, $3, 'x', 'Memory Agent Owner')",
+    )
+    .bind(user)
+    .bind(org)
+    .bind(format!("nod-{user}@example.test"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO personal_tokens
+             (id, user_id, name, token_hash, token_prefix, scope)
+         VALUES ($1, $2, 'research-agent', $3, 'utp_pat_ab12cd34', 'write')",
+    )
+    .bind(token)
+    .bind(user)
+    .bind(format!("nod-{token}"))
+    .execute(pool)
+    .await?;
     let (acme, shenzhen, shanghai) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     for (id, name) in [
         (acme, "Acme"),
@@ -63,6 +85,8 @@ async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
         kb,
         "Acme moved its headquarters to Shenzhen on 2026-03-15.",
         chrono::Utc::now(),
+        Some(user),
+        Some(token),
     )
     .await?;
     Ok(Fixture {
@@ -73,6 +97,8 @@ async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
         shanghai,
         hq,
         chunk,
+        user,
+        token,
     })
 }
 
@@ -103,6 +129,19 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
 
     let run = async {
         use utopia_store::pending::{self, Outcome, Proposal};
+        let (document_id,): (Uuid,) =
+            sqlx::query_as("SELECT document_id FROM chunks WHERE id = $1")
+                .bind(f.chunk)
+                .fetch_one(&pool)
+                .await?;
+        let chunks = utopia_store::documents::chunks_for_extraction(&pool, document_id).await?;
+        let remembered = chunks
+            .iter()
+            .find(|chunk| chunk.id == f.chunk)
+            .expect("the appended memory chunk must be available for extraction");
+        assert_eq!(remembered.recorded_by, Some(f.user));
+        assert_eq!(remembered.recorded_via_token, Some(f.token));
+
         let propose = |object: Uuid, from: &'static str| {
             pending::propose(
                 &pool,
@@ -121,7 +160,8 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
                     },
                     confidence: 0.9,
                     chunk_id: f.chunk,
-                    proposed_by: None,
+                    proposed_by: Some(f.user),
+                    proposed_via_token: Some(f.token),
                 },
             )
         };
@@ -133,6 +173,17 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         let queued = pending::for_chunk(&pool, f.kb, f.chunk).await?;
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].subject_name, "Acme");
+        assert_eq!(queued[0].proposed_by, Some(f.user));
+        assert_eq!(queued[0].proposed_by_name.as_deref(), Some("Memory Agent Owner"));
+        assert_eq!(queued[0].proposed_via_token, Some(f.token));
+        assert_eq!(
+            queued[0].proposed_via_token_name.as_deref(),
+            Some("research-agent")
+        );
+        assert_eq!(
+            queued[0].proposed_via_token_prefix.as_deref(),
+            Some("utp_pat_ab12cd34")
+        );
         assert!(queued[0].quote.contains("Acme moved its headquarters"), "原句要跟着提议一起给人看");
 
         // 2. 同一句重抽不重复提
@@ -141,6 +192,9 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         // 3. 点头：进账本，证据指回那句话，队列清空
         let Outcome::Proposed(id) = first else { unreachable!() };
         let done = pending::confirm(&pool, f.kb, id).await?;
+        assert_eq!(done.snapshot["proposed_via_token"], f.token.to_string());
+        assert_eq!(done.snapshot["proposed_via_token_name"], "research-agent");
+        assert_eq!(done.snapshot["proposed_via_token_prefix"], "utp_pat_ab12cd34");
         assert!(done.created, "确认该落一条新事实");
         assert_eq!(live_facts(&pool, f.kb).await?, 1);
         let (ev_chunk, ev_proposed): (Uuid, Option<String>) = sqlx::query_as(

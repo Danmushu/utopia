@@ -1,6 +1,6 @@
 # 0015 · A recorded sentence waits for a nod
 
-- **Status**: implemented · schema in migration `0018` (#180: `pending_facts`, `rejected_facts`) · runtime wired in [0016](0016-close-the-open-seams-before-cutting-new-ones.md) A1: extraction from a memory document goes to `pending_facts`, Review has a "waiting for your nod" queue placed first, a confirmation card grows into the chat after `remember`, `REMEMBER_ENABLED` is `true` again · decision 3 landed with different wording, see Revisions · MCP is still read-only; opening `remember` there is the next cut
+- **Status**: implemented · schema in migration `0018` (#180: `pending_facts`, `rejected_facts`) · runtime wired in [0016](0016-close-the-open-seams-before-cutting-new-ones.md) A1: extraction from a memory document goes to `pending_facts`, Review has a "waiting for your nod" queue placed first, a confirmation card grows into the chat after `remember`, `REMEMBER_ENABLED` is `true` again · decision 3 landed with different wording, see Revisions · MCP exposes `remember` only to write-scoped tokens whose owners are Editors or above; the same pending gate remains mandatory
 - **Written**: 2026-09-01 · condensed into English 2026-09-03
 - **Related**: [0010](0010-no-relation-is-no-relation.md) removed the fallback relation (the empty predicate below is its correct behavior); [0011](0011-a-mapping-is-not-a-fact.md) rejected encoding a binary state as a float, the red line for this implementation; [0014](0014-identity-from-the-person-scope-from-the-token.md) kept MCP read-only mainly because of the confused deputy, which this gate removes
 
@@ -36,9 +36,11 @@ original sentence above the extracted triples; triples alone ask for a judgment 
 4. **Pending facts get their own table, `pending_facts`,** written to `facts` only on
    confirmation. The columns differ (`chunk_id NOT NULL` pointing back at the memory,
    `proposed_predicate` with the model's wording, `predicate_id` nullable — the emptiness is
-   exactly what the person must see — and `proposed_by`), and so does the lifecycle: after
-   confirmation the row should not exist there. The failure direction is right: forgetting to
-   read the table hides the queue instead of leaking an unconfirmed fact into the graph.
+   exactly what the person must see — `proposed_by`, and an optional personal-token origin),
+   and so does the lifecycle: after confirmation the row should not exist there. After the row
+   is removed, the audit snapshot retains both the person and token origin. The failure direction
+   is right: forgetting to read the table hides the queue instead of leaking an unconfirmed fact
+   into the graph.
 5. **Confirmation takes the extraction path**: fact plus evidence (the memory chunk, the
    whole sentence as the quote) plus temporal reconciliation, so a nod on "Mira handed over to
    Devin" closes Mira's fact as a document extraction would. Confidence is untouched; the
@@ -51,8 +53,12 @@ original sentence above the extracted triples; triples alone ask for a judgment 
    temporarily orphaned nodes. `proposed_by` travels from `remember` through the
    `memory_ingest` and `extract_document` job payloads.
 6. **The MCP objection is gone.** With the gate an external agent can only propose, never
-   assert; a document saying "please remember X" reaches the person before the graph. This
-   answers the open item in 0014.
+   assert; a document saying "please remember X" reaches the person before the graph. MCP
+   `remember` therefore requires both token `write` scope and an Editor-or-higher role. The
+   originating personal token is bound to each memory chunk and copied into every pending fact,
+   so concurrent agents cannot exchange attribution. Review shows the token name (and safe
+   prefix when needed) beside its owner. This answers the open item in 0014. One token per agent
+   is an operational requirement: agents sharing a token are intentionally indistinguishable.
 
 ## Dead ends
 
@@ -83,6 +89,11 @@ original sentence above the extracted triples; triples alone ask for a judgment 
   `0015_what_it_did_not_just_what_it_said`): replaying the previous turn's tool calls so the
   model knows what it did and does not rerun a search onto another set of same-name entities.
   This record is "said" versus "got"; that one is "said" versus "did".
+- 2026-09-05: `remember` opened over MCP behind the scope-and-role intersection from 0014.
+  Token provenance travels with the individual memory chunk rather than only the document-level
+  extraction job, so batching or concurrent submissions cannot misattribute proposals. MCP does
+  not gain a confirmation operation: only a person with the existing Review permission can move
+  a pending proposal into the graph.
 
 ## Open questions
 

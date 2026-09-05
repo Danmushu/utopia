@@ -1317,6 +1317,16 @@ export const zh: Strings = {
     pendingNoPredicate: "本体里没有这个关系，这个词是模型自己的说法。",
     pendingNoPredicateChip: "本体里没有这个关系",
     pendingSaidBy: (name: string) => `${name} 说的`,
+    pendingProposedByAgent: (
+      tokenName: string | null,
+      tokenPrefix: string | null,
+      ownerName: string | null,
+    ) => {
+      const token = tokenName ?? tokenPrefix ?? "未知令牌";
+      const suffix = tokenName && tokenPrefix ? `（${tokenPrefix}）` : "";
+      const owner = ownerName ? ` · 所属用户 ${ownerName}` : "";
+      return `由 Agent「${token}」${suffix}提议${owner}`;
+    },
     nodCardTitle: (n: number) =>
       n === 1 ? "从这句话里抽出 1 条事实。确认进图，或驳回。" : `从这句话里抽出 ${n} 条事实。确认进图，或驳回。`,
     lowConfidenceHint:

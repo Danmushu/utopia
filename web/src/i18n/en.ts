@@ -1476,6 +1476,16 @@ export const en = {
     pendingNoPredicate: "The ontology has no relation for this; the word is the model's own.",
     pendingNoPredicateChip: "no relation in ontology",
     pendingSaidBy: (name: string) => `said by ${name}`,
+    pendingProposedByAgent: (
+      tokenName: string | null,
+      tokenPrefix: string | null,
+      ownerName: string | null,
+    ) => {
+      const token = tokenName ?? tokenPrefix ?? "unknown token";
+      const suffix = tokenName && tokenPrefix ? ` (${tokenPrefix})` : "";
+      const owner = ownerName ? ` · owned by ${ownerName}` : "";
+      return `proposed by agent “${token}”${suffix}${owner}`;
+    },
     nodCardTitle: (n: number) =>
       n === 1
         ? "One fact extracted from this. Confirm to add it to the graph, or reject."

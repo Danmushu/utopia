@@ -27,6 +27,19 @@ function objectText(f: PendingFactItem): string {
   return v.unit ? `${val} ${v.unit}` : val;
 }
 
+function proposerText(fact: PendingFactItem): string | null {
+  if (fact.proposed_via_token) {
+    return S.review.pendingProposedByAgent(
+      fact.proposed_via_token_name,
+      fact.proposed_via_token_prefix,
+      fact.proposed_by_name,
+    );
+  }
+  return fact.proposed_by_name
+    ? S.review.pendingSaidBy(fact.proposed_by_name)
+    : null;
+}
+
 /** 点头是写图的动作，Editor 起步——与服务端 `require_kb(Role::Editor)` 同一口径。
  *  Viewer 看得见提议、看不见按钮：按钮亮着却点不动，等于让人猜自己有没有权限。
  *  查询键与 Library 页共用（`kbOne`），不多打一次接口 */
@@ -55,6 +68,7 @@ export function PendingFactRow({
   const from = ym(fact.valid_from);
   const to = ym(fact.valid_to);
   const range = from || to ? `${from ?? "…"} → ${to ?? S.review.ongoing}` : null;
+  const proposer = proposerText(fact);
   return (
     <div className="glass rounded-xl p-4">
       {/* 原句先出。它是人自己说的，判断的依据就是它 */}
@@ -83,9 +97,9 @@ export function PendingFactRow({
         )}
       </div>
       <div className="mt-3 flex items-center gap-2">
-        {fact.proposed_by_name && (
+        {proposer && (
           <span className="text-[11px] text-neutral-600">
-            {S.review.pendingSaidBy(fact.proposed_by_name)}
+            {proposer}
           </span>
         )}
         {canDecide && (

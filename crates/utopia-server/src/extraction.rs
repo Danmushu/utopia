@@ -7,6 +7,7 @@ use crate::predicate_match::PredicateIndex;
 use crate::state::AppState;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -15,6 +16,25 @@ const RATE_LIMIT_TRIES: u32 = 5;
 /// 单次退避的上限。总等待因此封顶在两分钟出头，一个配额永远打满的账号
 /// 会干脆地失败，而不是把 worker 槽占死。
 const RATE_LIMIT_CAP: Duration = Duration::from_secs(60);
+
+/// 同一篇文档一次只抽一个任务。Memory 文档会被每次 `remember` 重复排队，而 worker
+/// 可以高并发消费；不串行时两个任务会同时捞到相同的未抽取 chunk，重复提议事实。
+static PER_DOCUMENT: LazyLock<Mutex<HashMap<Uuid, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
+fn extraction_lock_for(document_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = PER_DOCUMENT
+        .lock()
+        .expect("per-document extraction lock table poisoned");
+    // 只留仍在运行或等待的任务，避免文档数增长时锁表跟着永久增长。
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&document_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(document_id, Arc::downgrade(&lock));
+    lock
+}
 
 /// 退避的抖动。**不引 `rand`**：这里只要「别让 N 个分块同时醒来」，纳秒时钟
 /// 就够散，而多一个依赖要跟着走供应链。
@@ -273,14 +293,23 @@ async fn enqueue_bootstrap(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// `proposed_by`：这篇文档若是记忆日志，抽出的事实等人点头，这一列记「谁说的」。
-/// 批量摄入的文档传 None——那条路不经待确认队列，这个值用不上
+/// fallback 来源只服务升级时已经排队、但 chunk 上还没有来源列的旧 memory job。
 pub async fn extract_document(
     state: &AppState,
     document_id: Uuid,
-    proposed_by: Option<Uuid>,
+    fallback_proposed_by: Option<Uuid>,
+    fallback_proposed_via_token: Option<Uuid>,
 ) -> anyhow::Result<()> {
-    match run(state, document_id, proposed_by).await {
+    let lock = extraction_lock_for(document_id);
+    let _serial = lock.lock().await;
+    match run(
+        state,
+        document_id,
+        fallback_proposed_by,
+        fallback_proposed_via_token,
+    )
+    .await
+    {
         Ok(()) => Ok(()),
         Err(e) => {
             // 原因随状态落库：只进日志的错误等于没有错误
@@ -540,7 +569,12 @@ async fn resolve_bare(
     Ok(id)
 }
 
-async fn run(state: &AppState, document_id: Uuid, proposed_by: Option<Uuid>) -> anyhow::Result<()> {
+async fn run(
+    state: &AppState,
+    document_id: Uuid,
+    fallback_proposed_by: Option<Uuid>,
+    fallback_proposed_via_token: Option<Uuid>,
+) -> anyhow::Result<()> {
     let doc = utopia_store::documents::get(&state.pool, document_id).await?;
     // 排队之后被删了（#268）：墓碑不抽——抽出来的事实会活在一个已删除的出处上
     if doc.deleted_at.is_some() {
@@ -694,6 +728,10 @@ async fn run(state: &AppState, document_id: Uuid, proposed_by: Option<Uuid>) -> 
             tracing::info!(%document_id, "抽取任务已被新一轮接管，退出");
             return Ok(());
         }
+        // 身份属于这一句，不属于共享的 Memory 文档或执行它的 worker。旧任务的
+        // payload 只在迁移前 chunk 没有来源时兜底。
+        let proposed_by = chunk.recorded_by.or(fallback_proposed_by);
+        let proposed_via_token = chunk.recorded_via_token.or(fallback_proposed_via_token);
         let ctx: Option<&[f32]> = chunk.embedding.as_ref().map(|v| v.as_slice());
         // 本体装得下就用全量那份；装不下就拿**这一块自己的向量**检索候选。
         // 向量是现成的——实体消解本来就在用它（上面那个 ctx），检索一次
@@ -1130,6 +1168,7 @@ async fn run(state: &AppState, document_id: Uuid, proposed_by: Option<Uuid>) -> 
                                 confidence,
                                 chunk_id: chunk.id,
                                 proposed_by,
+                                proposed_via_token,
                             },
                         )
                         .await?
@@ -1251,6 +1290,7 @@ async fn run(state: &AppState, document_id: Uuid, proposed_by: Option<Uuid>) -> 
                                 confidence,
                                 chunk_id: chunk.id,
                                 proposed_by,
+                                proposed_via_token,
                             },
                         )
                         .await?
@@ -1557,6 +1597,7 @@ async fn run(state: &AppState, document_id: Uuid, proposed_by: Option<Uuid>) -> 
                         confidence,
                         chunk_id: chunk.id,
                         proposed_by,
+                        proposed_via_token,
                     },
                 )
                 .await?

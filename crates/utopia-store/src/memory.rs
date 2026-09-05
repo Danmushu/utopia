@@ -78,23 +78,29 @@ pub async fn append_episode(
     kb_id: Uuid,
     text: &str,
     occurred_at: DateTime<Utc>,
+    recorded_by: Option<Uuid>,
+    recorded_via_token: Option<Uuid>,
 ) -> AppResult<(Uuid, Uuid)> {
     let doc_id = get_or_create_memory_doc(pool, kb_id).await?;
     let stamped = format!("[{}] {}", occurred_at.format("%Y-%m-%d %H:%M"), text.trim());
     let chunk_id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO chunks (id, kb_id, document_id, seq, text, char_start, char_end, doc_version)
+        "INSERT INTO chunks
+            (id, kb_id, document_id, seq, text, char_start, char_end, doc_version,
+             recorded_by, recorded_via_token)
          VALUES ($1, $2, $3,
                  (SELECT COALESCE(MAX(seq), -1) + 1 FROM chunks
                   WHERE document_id = $3 AND superseded_at IS NULL),
-                 $4, 0, $5, 1)",
+                 $4, 0, $5, 1, $6, $7)",
     )
     .bind(chunk_id)
     .bind(kb_id)
     .bind(doc_id)
     .bind(&stamped)
     .bind(stamped.chars().count() as i32)
+    .bind(recorded_by)
+    .bind(recorded_via_token)
     .execute(&mut *tx)
     .await?;
     sqlx::query(

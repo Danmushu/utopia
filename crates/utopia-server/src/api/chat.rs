@@ -46,7 +46,7 @@ pub struct ChatReq {
     pub message: String,
 }
 
-fn tools_schema(can_write: bool, data_source_names: &[String]) -> serde_json::Value {
+pub(super) fn tools_schema(can_write: bool, data_source_names: &[String]) -> serde_json::Value {
     let mut tools = base_tools();
     if !data_source_names.is_empty() {
         if let Some(arr) = tools.as_array_mut() {
@@ -732,6 +732,7 @@ pub async fn chat(
                     mounted_sources: &mounted_sources,
                     can_write,
                     actor: Some(user.id),
+                    personal_token_id: None,
                 };
                 let (result, step) = tools::dispatch(&ctx, &mut sink, &call.name, &args).await;
                 // **这一步发生在正文的哪个位置。**

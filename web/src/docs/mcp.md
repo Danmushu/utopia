@@ -1,6 +1,6 @@
 # Agents over MCP
 
-Utopia serves every knowledge base as a **Model Context Protocol** server. Any MCP client — Claude Desktop, Cursor, an agent framework, a script — can search a base, read a document, look up an entity and ask what changed, with the same permissions as the person whose token it carries. This version exposes **read tools only**; nothing an agent does over MCP changes the base.
+Utopia serves every knowledge base as a **Model Context Protocol** server. Any MCP client — Claude Desktop, Cursor, an agent framework, a script — can search a base, read a document, look up an entity and ask what changed, with the same permissions as the person whose token it carries. Every authorized token gets six read tools. A `write` token whose owner is an Editor, Admin or Owner also gets `remember`: the agent can record a sentence and propose facts, but a person must confirm them before they enter the graph.
 
 ## Get a token
 
@@ -9,13 +9,15 @@ Tokens belong to people, not to bases: **Account → Agents & tokens → Persona
 | Field | Meaning |
 |---|---|
 | Name | For your own bookkeeping; shows in the token list and in the audit log |
-| Scope | `read` (default) or `write`. Scope is a **ceiling**, not a grant: a token can never do more than its owner can, and this version's MCP tools are read-only even for a `write` token |
+| Scope | `read` (default) or `write`. Scope is a **ceiling**, not a grant: `remember` is exposed only when the token has `write` scope **and** its owner is an Editor, Admin or Owner of the base |
 | Knowledge bases | Optional. Leave empty and the token reaches every base its owner can open; pick some to narrow it |
 | Expires in | 90 days by default |
 
 The token value (`utp_pat_…`) is shown **once**, when it is issued. Revoking it takes effect on the next call.
 
-Anything an agent does with the token is recorded in the base's Activity as the token's owner, with the tool name, so a token is never a way around the audit trail.
+Anything an agent does with the token is recorded in the base's Activity as the token's owner, with the tool name, so a token is never a way around the audit trail. Pending facts proposed through `remember` also retain the token name and safe prefix: Review shows which agent token proposed them and who owns it.
+
+Issue one token per agent. Tokens represent people rather than distinct machine identities, so two agents that share a token cannot be distinguished in Review or the audit trail.
 
 ## The endpoint
 
@@ -43,6 +45,7 @@ Three methods are served:
 | `entity_facts` | One entity's facts with validity ranges. Pass `at` (a date) to see the world as of that day; this is the tool for "who was X in 2024" |
 | `changes` | What the graph learned or revised in a window of **record** time: asserted, corrected, rejected, merged. Needs no entity; use it when the question names a period, not a subject |
 | `search_docs` | Utopia's own manual, for questions about how the platform works. Never the user's documents |
+| `remember` | **Write token + Editor or above only.** Records one sentence as memory and queues extracted facts for human confirmation. The sentence becomes searchable immediately; no proposed fact enters the graph until a person confirms it in Review |
 
 The two time axes matter here. `entity_facts` reads **world time** (when something was true); `changes` reads **record time** (when Utopia came to believe it, and when it revised that belief). An agent that confuses them will answer "what happened in March" with "what we learned in March".
 
@@ -91,5 +94,5 @@ One entry per knowledge base you want the agent to reach. The agent sees the sam
 
 ## What is not here yet
 
-- **Writing.** `remember` (recording an episode) and `query_data` (SQL over a mounted database) are chat tools today and are not served over MCP. When they are, the write path will go through the same confirmation step a person's own "remember" does: an agent proposes, a person confirms, and only then does anything enter the graph.
+- **Database queries.** `query_data` (SQL over a mounted database) remains a Chat-only tool and is not exposed over MCP, including to `write` tokens.
 - **Streaming.** Responses are single JSON-RPC replies; there is no server-sent event channel.

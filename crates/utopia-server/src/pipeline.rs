@@ -99,11 +99,13 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
 /// 重建全文索引、触发增量抽取（extracted_at 为空的新 chunk 才会被抽）。
 /// 免解析免分块——episode 落库时已是 chunk。
 ///
-/// `proposed_by`：说这句话的人。一路传到抽取，落在 `pending_facts.proposed_by`（0015）
+/// 两个来源参数只为兼容升级时已排队的旧任务；新记忆把来源固化在具体 chunk 上，
+/// 抽取时不会因同一 Memory 文档里有多个 agent 的句子而串号。
 pub async fn memory_ingest(
     state: &AppState,
     document_id: Uuid,
     proposed_by: Option<Uuid>,
+    proposed_via_token: Option<Uuid>,
 ) -> anyhow::Result<()> {
     let doc = utopia_store::documents::get(&state.pool, document_id).await?;
     if doc.deleted_at.is_some() {
@@ -147,7 +149,11 @@ pub async fn memory_ingest(
         utopia_store::jobs::enqueue(
             &state.pool,
             "extract_document",
-            serde_json::json!({ "document_id": document_id, "proposed_by": proposed_by }),
+            serde_json::json!({
+                "document_id": document_id,
+                "proposed_by": proposed_by,
+                "proposed_via_token": proposed_via_token,
+            }),
         )
         .await?;
     }

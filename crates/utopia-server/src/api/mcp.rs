@@ -32,11 +32,10 @@ use crate::state::AppState;
 /// 规范要求服务端回自己支持的版本，由客户端决定接不接受
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// 这一版放出去的工具。**只读五个**（0014）：
+/// MCP 放出去的六个只读工具（0014）。
 ///
-/// `query_data` 对生产库跑 SQL，`remember` 往账本里写，两者各自还有没答完的
-/// 问题——外部 agent 写进来的事实挂什么证据、跑 SQL 的审计怎么记。先把身份
-/// 这条路走通。
+/// `query_data` 对生产库跑 SQL，仍不对 MCP 开放。`remember` 只在令牌 scope、
+/// 用户的 KB 角色和功能开关三者都允许时开放。
 const EXPOSED: [&str; 5] = [
     "search_chunks",
     "get_document",
@@ -47,8 +46,12 @@ const EXPOSED: [&str; 5] = [
 /// `entity_facts` 也在内，单列是因为上面那个数组要定长
 const EXPOSED_EXTRA: &str = "entity_facts";
 
-fn is_exposed(name: &str) -> bool {
-    EXPOSED.contains(&name) || name == EXPOSED_EXTRA
+fn is_exposed(name: &str, can_write: bool) -> bool {
+    EXPOSED.contains(&name) || name == EXPOSED_EXTRA || (name == "remember" && can_write)
+}
+
+fn effective_can_write(auth: &utopia_store::tokens::Authenticated, role: Role) -> bool {
+    auth.can_write() && role >= Role::Editor && super::chat::REMEMBER_ENABLED
 }
 
 /// 认证 + 授权。**两道，不是一道。**
@@ -64,6 +67,7 @@ async fn authorize(
     (
         utopia_core::models::User,
         utopia_store::tokens::Authenticated,
+        Role,
     ),
     utopia_core::AppError,
 > {
@@ -82,8 +86,13 @@ async fn authorize(
         .await?
         .ok_or(utopia_core::AppError::Unauthorized)?;
     // 角色：和网页端走同一个守卫，一行没改
-    utopia_store::access::require_kb(&state.pool, &user, kb_id, Role::Viewer).await?;
-    Ok((user, auth))
+    let kb = utopia_store::access::require_kb(&state.pool, &user, kb_id, Role::Viewer).await?;
+    // `require_kb` 已证明角色至少为 Viewer；这里取出具体角色，供 MCP 写权限与
+    // Token scope 求交集。不能只看 write scope，否则 Viewer 会被令牌抬权。
+    let role = utopia_store::access::kb_role(&state.pool, &user, &kb)
+        .await?
+        .ok_or(utopia_core::AppError::Forbidden)?;
+    Ok((user, auth, role))
 }
 
 /// OpenAI 形状 → MCP 形状。
@@ -95,7 +104,7 @@ async fn authorize(
 /// 已知的瑕疵：描述是给应用内助手写的，`search_chunks` 那句还提着「可以引用
 /// 成 [n]」，而 MCP 客户端拿不到引用编号。共用一份的好处大过这句话的代价，
 /// 真要分开时再说。
-fn to_mcp_tools(openai: &Value) -> Vec<Value> {
+fn to_mcp_tools(openai: &Value, can_write: bool) -> Vec<Value> {
     openai
         .as_array()
         .map(|arr| {
@@ -103,7 +112,7 @@ fn to_mcp_tools(openai: &Value) -> Vec<Value> {
                 .filter_map(|t| {
                     let f = t.get("function")?;
                     let name = f.get("name")?.as_str()?;
-                    if !is_exposed(name) {
+                    if !is_exposed(name, can_write) {
                         return None;
                     }
                     Some(json!({
@@ -138,7 +147,8 @@ pub async fn handle(
     headers: HeaderMap,
     Json(req): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let (user, auth) = authorize(&state, &headers, kb_id).await?;
+    let (user, auth, role) = authorize(&state, &headers, kb_id).await?;
+    let can_write = effective_can_write(&auth, role);
     let id = req.get("id").cloned();
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(json!({}));
@@ -158,13 +168,15 @@ pub async fn handle(
         "ping" => ok(id, json!({})),
         "tools/list" => ok(
             id,
-            json!({ "tools": to_mcp_tools(&super::chat::base_tools()) }),
+            json!({
+                "tools": to_mcp_tools(&super::chat::tools_schema(can_write, &[]), can_write)
+            }),
         ),
         "tools/call" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            if !is_exposed(name) {
-                // 未暴露的工具（query_data / remember）要说清是「这一版没放出来」，
+            if !is_exposed(name, can_write) {
+                // 未暴露的工具要说清是「这一版没放出来」，
                 // 而不是「没有这个工具」——前者客户端不会反复重试
                 return Ok(rpc_err(
                     id,
@@ -173,16 +185,16 @@ pub async fn handle(
                 ));
             }
             let kb = utopia_store::kbs::get(&state.pool, kb_id).await?;
-            // 这一版只放只读工具，所以 mounted_sources 空、can_write 假：
-            // **就算令牌 scope 是 write 也不放开**——scope 是上限不是授权，
-            // 而这一版的上限由 EXPOSED 定
+            // MCP 不开放数据源查询，所以 mounted_sources 为空。写权限使用与
+            // tools/list 完全相同的交集结果，避免客户端缓存列表后绕过授权。
             let ctx = ToolCtx {
                 state: &state,
                 kb_id,
                 workspace_id: kb.workspace_id,
                 mounted_sources: &[],
-                can_write: false,
+                can_write,
                 actor: Some(user.id),
+                personal_token_id: Some(auth.token_id),
             };
             let mut sink = ToolSink::default();
             let (text, _step) = tools::dispatch(&ctx, &mut sink, name, &args).await;
@@ -206,4 +218,53 @@ pub async fn handle(
         }
         other => rpc_err(id, -32601, &format!("Unknown method: {other}")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth(scope: &str) -> utopia_store::tokens::Authenticated {
+        utopia_store::tokens::Authenticated {
+            user_id: Uuid::new_v4(),
+            token_id: Uuid::new_v4(),
+            scope: scope.into(),
+            kb_ids: None,
+        }
+    }
+
+    #[test]
+    fn write_permission_is_the_intersection_of_scope_role_and_kill_switch() {
+        let read = auth("read");
+        let write = auth("write");
+
+        assert!(!effective_can_write(&read, Role::Editor));
+        assert!(!effective_can_write(&write, Role::Viewer));
+        assert_eq!(
+            effective_can_write(&write, Role::Editor),
+            super::super::chat::REMEMBER_ENABLED
+        );
+        assert_eq!(
+            effective_can_write(&write, Role::Owner),
+            super::super::chat::REMEMBER_ENABLED
+        );
+    }
+
+    #[test]
+    fn mcp_schema_adds_only_remember_for_effective_writers() {
+        let chat_tools = super::super::chat::tools_schema(true, &["warehouse".into()]);
+        let read_names: Vec<_> = to_mcp_tools(&chat_tools, false)
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+        let write_names: Vec<_> = to_mcp_tools(&chat_tools, true)
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+
+        assert_eq!(read_names.len(), 6);
+        assert!(!read_names.iter().any(|name| name == "remember"));
+        assert!(write_names.iter().any(|name| name == "remember"));
+        assert!(!write_names.iter().any(|name| name == "query_data"));
+    }
 }

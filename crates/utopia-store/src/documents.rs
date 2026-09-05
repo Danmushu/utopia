@@ -826,6 +826,8 @@ pub struct ChunkForExtract {
     pub seq: i32,
     pub text: String,
     pub embedding: Option<Vector>,
+    pub recorded_by: Option<Uuid>,
+    pub recorded_via_token: Option<Uuid>,
 }
 
 pub async fn chunks_for_extraction(
@@ -834,7 +836,7 @@ pub async fn chunks_for_extraction(
 ) -> AppResult<Vec<ChunkForExtract>> {
     // 只取未抽取的分块：认领的未变段落携带 extracted_at 跳过（增量抽取 + 断点续抽）
     let rows = sqlx::query_as(
-        "SELECT id, seq, text, embedding FROM chunks
+        "SELECT id, seq, text, embedding, recorded_by, recorded_via_token FROM chunks
          WHERE document_id = $1 AND superseded_at IS NULL AND extracted_at IS NULL
          ORDER BY seq",
     )

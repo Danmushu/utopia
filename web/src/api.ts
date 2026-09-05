@@ -595,6 +595,11 @@ export interface PendingFactItem {
   quote: string;
   proposed_by: string | null;
   proposed_by_name: string | null;
+  /** MCP 提议的来源令牌；Chat 记忆为空，继续按 `proposed_by_name` 展示人。 */
+  proposed_via_token: string | null;
+  proposed_via_token_name: string | null;
+  /** 可安全展示的令牌前缀，用于区分同名 Agent 令牌。 */
+  proposed_via_token_prefix: string | null;
   created_at: string;
 }
 

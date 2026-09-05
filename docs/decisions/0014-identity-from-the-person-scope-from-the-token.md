@@ -1,6 +1,6 @@
 # 0014 · Identity from the person, scope from the token
 
-- **Status**: implemented (#161 record, #180 code) · `personal_tokens` and a Streamable HTTP MCP server at `POST /api/v1/kbs/{kb_id}/mcp` with five read-only tools, `application/json` responses rather than SSE · the account-level "Agents & tokens" page at `/account/tokens` (0016 A2): plaintext shown once beside a per-base client config snippet, the list keeps the prefix, revocation leaves a trace · `can_write` is still hard-coded `false`, so a `write` scope changes nothing yet
+- **Status**: implemented (#161 record, #180 code) · `personal_tokens` and a Streamable HTTP MCP server at `POST /api/v1/kbs/{kb_id}/mcp` with six read-only tools, plus `remember` only for a `write` token owned by an Editor, Admin or Owner; `query_data` remains unavailable · `application/json` responses rather than SSE · the account-level "Agents & tokens" page at `/account/tokens` (0016 A2): plaintext shown once beside a per-base client config snippet, the list keeps the prefix, revocation leaves a trace
 - **Written**: 2026-09-01 · condensed into English 2026-09-03
 - **Related**: migration `0014_data_source_grants` gave data sources a grant layer; this is the same question where a machine knocks. [0004](0004-language-and-localization.md) has the server speak English only, MCP error codes included. [0015](0015-recording-a-sentence-is-not-asserting-a-fact.md) removes the main objection to opening `remember` over MCP.
 
@@ -47,12 +47,15 @@ push documents in.
    key on `audit_events.actor_id`: the ledger must outlive the user, the keys must not.
    Revocation writes `revoked_at` rather than deleting the row: the revocation is a trace.
 
-5. **Every tool call checks scope.** The lesson of `0014_data_source_grants`: list filtering
+5. **Every tool call checks effective permission.** The lesson of `0014_data_source_grants`: list filtering
    only guards what is visible, the mount endpoint is called by id, so the guard sits on both
    sides. Rather than a handshake check followed by trust for the connection's lifetime, every
    POST re-runs authentication (revocation and expiry in the SQL `WHERE`), `covers()` and
-   `require_kb`; a token revoked mid-session fails on its next call. Each call writes an audit
-   row (`mcp.tool_called`, target = the token), so attribution is real.
+   `require_kb`; a token revoked mid-session fails on its next call. `remember` appears in
+   `tools/list` and succeeds in `tools/call` only when the token has `write` scope, its owner
+   has at least the Editor role, and remembering is enabled. Thus a write-scoped Viewer and a
+   read-scoped Editor both remain read-only. Each call writes an audit row (`mcp.tool_called`,
+   target = the token), so attribution is real.
 
 ## Dead ends
 
@@ -71,12 +74,15 @@ push documents in.
 - 2026-09-02: the placeholder crate `utopia-mcp` advertised three tools that never existed;
   the server lives in `utopia-server/src/api/mcp.rs`. Deleted with `utopia-graph` and
   `utopia-connectors` ([0016](0016-close-the-open-seams-before-cutting-new-ones.md) A2).
+- 2026-09-05: MCP has six read tools (the earlier count of five omitted `get_document`).
+  `remember` is now the seventh, conditional tool. Its effective permission is token `write`
+  scope intersected with an Editor-or-higher base role; the call guard repeats the list guard.
+  Agent provenance is the person plus the personal token. One token should be issued per agent,
+  because agents sharing a token cannot be distinguished. `query_data` remains Chat-only.
 
 ## Open questions
 
-- **`query_data` and `remember` over MCP.** The first version ships `search_chunks`,
-  `search_docs`, `find_entities`, `entity_facts` and `changes`. `remember` waits on the gate
-  of 0015; what evidence an external agent's fact carries and how SQL runs are audited are
-  still unanswered.
+- **`query_data` over MCP.** It remains unavailable. Its access to mounted production data and
+  the required grant and audit model are still unanswered; `write` scope does not expose it.
 - **Tokens across workspaces.** `kb_ids` is a base-level whitelist; a workspace-level grant
   would look much like `data_source_grants`, and the two concepts may merge then.

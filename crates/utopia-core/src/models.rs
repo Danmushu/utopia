@@ -1136,6 +1136,9 @@ pub struct PendingFactView {
     pub quote: String,
     pub proposed_by: Option<Uuid>,
     pub proposed_by_name: Option<String>,
+    pub proposed_via_token: Option<Uuid>,
+    pub proposed_via_token_name: Option<String>,
+    pub proposed_via_token_prefix: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

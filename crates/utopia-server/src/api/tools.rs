@@ -39,6 +39,8 @@ pub struct ToolCtx<'a> {
     /// 在说话的人。`remember` 把它记成「谁说的」，一路跟到待确认队列（0015）。
     /// 对话里恒有值；MCP 也有——令牌以人的身份行事（0014）
     pub actor: Option<Uuid>,
+    /// 经哪枚个人令牌说的。网页对话为 None；MCP 从认证结果填入，调用参数不能伪造。
+    pub personal_token_id: Option<Uuid>,
 }
 
 /// 工具执行过程中往外攒的东西。
@@ -434,7 +436,15 @@ pub async fn remember(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult
             json!({ "kind": "tool", "label": "remember", "detail": "empty" }),
         );
     }
-    match utopia_store::memory::append_episode(&ctx.state.pool, ctx.kb_id, text, occurred_at).await
+    match utopia_store::memory::append_episode(
+        &ctx.state.pool,
+        ctx.kb_id,
+        text,
+        occurred_at,
+        ctx.actor,
+        ctx.personal_token_id,
+    )
+    .await
     {
         Ok((doc_id, chunk_id)) => {
             // 摄入(embedding/索引/增量抽取)异步走队列，不阻塞对话。
@@ -443,7 +453,13 @@ pub async fn remember(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult
             let _ = utopia_store::jobs::enqueue(
                 &ctx.state.pool,
                 "memory_ingest",
-                json!({ "document_id": doc_id, "proposed_by": ctx.actor }),
+                json!({
+                    "document_id": doc_id,
+                    // 新写入以 chunk 上的来源为准；payload 保留身份，让升级前已排队的
+                    // memory job 重试时仍能沿用旧路径，不把说话人悄悄丢掉。
+                    "proposed_by": ctx.actor,
+                    "proposed_via_token": ctx.personal_token_id,
+                }),
             )
             .await;
             ctx.state.emit_document(ctx.kb_id, doc_id);
