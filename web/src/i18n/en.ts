@@ -258,6 +258,25 @@ export const en = {
     reportIssue: "Report an issue",
     refresh: "Refresh",
   },
+  /* 空状态的共用文案（#313）。
+     **状态一句话，动作在按钮上，不解释原理。** 从前这里是一整段：
+     「图是空的。先去 管理 → 模型 配置对话模型，然后在文库上传文档——
+     实体和关系会自动抽取。」——一句话里塞了状态、两个动作和一段原理，
+     而盯着空页面的人要的是下一步点哪儿。原理属于文档，不属于空状态 */
+  steps: {
+    noModel: "No chat model yet.",
+    /* 配模型要工作区管理员，别人只能去找人——所以话不同，按钮也不给 */
+    noModelAsk: "No chat model yet. Ask an administrator.",
+    configureModel: "Configure model",
+    noDocs: "No documents yet.",
+    upload: "Upload a document",
+    processing: (n: number) => `Reading ${n} document${n === 1 ? "" : "s"}…`,
+    viewProgress: "View progress",
+    someFailed: (n: number) => `${n} document${n === 1 ? "" : "s"} failed.`,
+    /* 文档齐了、抽取也跑完了，图还是空的：不是「还没开始」，是没抽出东西 */
+    nothingExtracted: "Nothing extracted yet.",
+    openLibrary: "Open Library",
+  },
   login: {
     signIn: "Sign in",
     signUp: "Sign up",
@@ -311,7 +330,7 @@ export const en = {
         {
           h: "Retention and deletion",
           body: [
-            "Deleting a document removes it from the base and retires the facts that had no other source; facts with another source keep it as provenance. The content is kept so the deletion can be undone; a deleted document can be restored, and a re-upload of the same file restores it too. Deleting a knowledge base permanently removes its documents, graph and sources.",
+            "Deleting a document removes it from the base and retires the facts that had no other source; facts with another source keep it as provenance. The content is kept so the deletion can be undone; a deleted document can be restored, and a re-upload of the same file restores it too. A knowledge-base admin can purge a deleted document, which removes its stored content for good. Deleting a knowledge base permanently removes its documents, graph and sources.",
           ],
         },
         {
@@ -372,6 +391,19 @@ export const en = {
           : `Document deleted · ${n} facts retired with it`,
     undo: "Undo",
     restored: "Document restored",
+    /** 「已删除」视图与真删（#268 下半） */
+    deleted: "Deleted",
+    colDeleted: "Deleted",
+    restore: "Restore",
+    purge: "Purge",
+    purgeTitle: "Purge this document?",
+    purgeHint: (name: string) =>
+      `“${name}” is deleted, and its content is still stored so the deletion can be undone. ` +
+      "Purging removes the stored file, its chunks and its evidence quotes for good. " +
+      "The facts it retired stay retired, and the deletion stays on record. This cannot be undone.",
+    purgeConfirm: "Purge",
+    purged: "Content purged",
+    deletedEmpty: "Nothing deleted. Deleted documents wait here until they are restored or purged.",
     title: "Library",
     upload: "Upload files",
     uploading: "Uploading…",
@@ -428,6 +460,7 @@ export const en = {
       domain_mismatch:
         "The subject does not fit the relation, and swapping would not help",
       not_an_entity_name: "That name is a sentence, not a thing",
+      clause_suspect: "Kept, but the name reads like a clause: a sample for the guard",
       direction_corrected:
         "Subject and object were swapped to match the signature",
     } as Record<string, string>,
@@ -692,11 +725,6 @@ export const en = {
     // 一个实体也抽不出来。先配模型，再传文档
     // 管理页在头像菜单里叫 Administration，提示语得叫同一个名字（#267）。
     // 能配模型的人和不能配的人看到的不是同一句：后者只能去找管理员
-    emptyBody:
-      "The graph is empty. Ask an administrator to configure a chat model, then upload documents in the Library — entities and relations are extracted automatically.",
-    emptyBodyAdmin:
-      "The graph is empty. Configure a chat model under Administration → Models first, then upload documents in the Library — entities and relations are extracted automatically.",
-    emptyOpenModels: "Open Administration → Models",
     facts: "facts",
     noFacts: "No facts for this entity yet",
     confidence: "confidence",
@@ -741,6 +769,7 @@ export const en = {
         : `${n} other entities share this name.`,
     sameNameHint: "If they are the same thing, merge them under Review.",
     mergeInto: "Merge in",
+    mergeTitle: "Merge entities",
     mergeIntoHint:
       "Fold that entity into this one. Its facts move here; merges can be reverted.",
     mergeConfirm: (from: string, into: string) =>
@@ -824,9 +853,33 @@ export const en = {
     undated: "Undated",
     timelineEmpty: "No dated facts yet.",
     lastConfirmed: (d: string) => `confirmed ${d}`,
+    /* 三种来源共用一个标记（引擎接任对账、Review 裁决、有人手改），所以这句
+       不再声称是哪一种——加上人工编辑之后，原来那句「由对账闭合」会说错来源。
+       想知道是谁改的，History 有 actor 和时刻 */
     correctedHint:
-      "This interval was closed by reconciliation (automatic succession or a review decision), " +
-      "not stated verbatim in a document. The superseded assertion remains in the ledger.",
+      "This interval comes from a correction rather than a sentence in a document: " +
+      "automatic succession, a review decision, or someone editing it. " +
+      "The superseded assertion stays in the ledger — see History for who and when.",
+    /* ---- 人工修正有效区间（302） ---- */
+    editTime: "Correct the interval",
+    timeStart: "Start",
+    timeEnd: "End",
+    /* 结束端的三态，与账本里的三种写法一一对应（见迁移 0003 的注释） */
+    timeEndOpen: "Still going",
+    timeEndUnknown: "Ended, date unknown",
+    timeEndDate: "Ended on",
+    /* 写多少位就是多少精度：2023 是「那一年」，2023-06 是「那个月」 */
+    timeFormat: "2023, 2023-06 or 2023-06-15",
+    timeBadDate: "Use 2023, 2023-06 or 2023-06-15.",
+    timeNote: "Why (optional)",
+    timeNotePlaceholder: "The document says the first half of 2023",
+    timeSave: "Save",
+    timeCancel: "Cancel",
+    timeSaved: "Interval corrected",
+    timeSavedClosed: (n: number) =>
+      `Interval corrected — ${n} open fact${n === 1 ? "" : "s"} closed to match`,
+    timeSavedConflicts: (n: number) =>
+      `Interval corrected — ${n} conflict${n === 1 ? "" : "s"} need a ruling in Review`,
     ongoing: "now",
     /* 必须跟 ongoing 看得出区别：混淆这两个正是迁移 0046 要修的东西——
        原文说 "former CEO"，界面却显示 now */
@@ -912,9 +965,10 @@ export const en = {
         "Register connections here; each knowledge base mounts the ones it may query.",
       name: "Name",
       connString: "Connection string — the scheme picks the engine",
-      // 四种写法各一行；令牌放 password 位，Databricks 的路径就是控制台里的 httpPath
+      // 每种写法各一行；令牌放 password 位，Databricks 的路径就是控制台里的 httpPath
       connSchemes:
         "postgres://user:pass@host:5432/db\n" +
+        "mysql://user:pass@host:3306/db   (MariaDB, TiDB, OceanBase, Doris, StarRocks)\n" +
         "trino://user[:pass]@host:8080/catalog[/schema]   (Iceberg, Delta Lake, Hive)\n" +
         "databricks://:TOKEN@host/sql/1.0/warehouses/ID?catalog=main\n" +
         "snowflake://:TOKEN@account.snowflakecomputing.com/DB/SCHEMA?warehouse=WH",
@@ -924,6 +978,7 @@ export const en = {
       testFail: "Failed",
       neverTested: "Untested",
       remove: "Remove",
+      empty: "No data sources registered yet. Register one below.",
       grants: "Available to",
       grantsHint:
         "Which workspaces may use this source. **Once granted, KB admins in those workspaces choose whether to mount it** — " +
@@ -956,6 +1011,7 @@ export const en = {
       visRestricted: "Invited only",
       create: "Create",
       openSettings: "Settings",
+      empty: "No knowledge bases yet. Create the first one above.",
       docs: (n: number) => `${n} docs`,
     },
     modelsIntro:
@@ -1011,9 +1067,6 @@ export const en = {
     description: "Description",
     descriptionHint:
       "Guides the extractor: what belongs here, with a couple of examples. Fed straight into the extraction prompt.",
-    overviewHint:
-      "The schema your extractor follows. Select a class or property on the left to edit it, or add new ones with the + buttons.",
-    overviewStats: (c: number, p: number) => `${c} classes · ${p} properties`,
     attributes: "Attributes",
     attributesHint:
       "Literal-valued fields of this class (a person's salary, a contract's amount). Extracted with evidence and history, like any fact.",
@@ -1026,7 +1079,7 @@ export const en = {
       text: "Text",
       number: "Number",
       date: "Date",
-      bool: "Yes / no",
+      bool: "Boolean",
     } as Record<string, string>,
     cancel: "Cancel",
     key: "Key",
@@ -1038,7 +1091,7 @@ export const en = {
     disjoint: "Cannot also be",
     disjointHint:
       "Classes nothing can belong to at the same time. A Person is not an Organisation. The consistency check uses this to find classes that can never have an instance.",
-    noDisjoint: "No class excluded",
+    noDisjoint: "None declared yet",
     disjointWithParent:
       "This class inherits from a class it says it cannot be — nothing could ever satisfy it.",
     /* 多父时左栏只能画一处，说明画在哪一支下 */
@@ -1204,6 +1257,43 @@ export const en = {
       `Some could not be added: ${keys.join(", ")} — the rest went through.`,
     proposals: "AI proposals",
     keyHint: "lowercase_snake_case",
+    /* ---- Schema diagram ---- */
+    schemaDiagram: "Schema diagram",
+    schemaSearchPlaceholder: "Search schema…",
+    /* 从前这句把「先加个类或导入 OWL 文件」说成了开始的前提，而本体本来就
+       从语料里长（0003，默认开）——那句话正是 #313 说的劝退点。现在只说状态，
+       动作留给左栏本来就有的 New class 与 Import */
+    schemaEmpty: "No classes yet. Extraction adds them as documents arrive.",
+    schemaFitView: "Fit view",
+    schemaZoomIn: "Zoom in",
+    schemaZoomOut: "Zoom out",
+    schemaLegendInheritance: "Inheritance",
+    schemaLegendRelation: "Relations",
+    schemaLegendDisjoint: "Disjoint",
+    schemaUnscoped: (n: number) => `Unscoped properties (${n})`,
+    schemaUnscopedHint:
+      "Not limited to specific classes, so no line on the canvas would be honest. Select one to inspect or edit it.",
+    schemaClosePanel: "Close",
+    // 面板里的三段：定义（表单）/ 属性（关系 + 字面值字段）/ 实例。
+    // 用页面自己的词——左栏就叫 Classes / Properties
+    schemaTabDefinition: "Definition",
+    schemaTabProperties: "Properties",
+    schemaTabInstances: "Instances",
+    schemaAddRelationship: "New relationship…",
+    schemaCheckDefects: (n: number) =>
+      n === 1
+        ? "1 new ontology issue from this change"
+        : `${n} new ontology issues from this change`,
+    schemaCheckReview: "Review",
+    schemaRelationships: "Relationships",
+    schemaOutgoing: "From this class",
+    schemaIncoming: "To this class",
+    schemaNoRelationships: "No relationships yet.",
+    schemaConnectHint: "Connect using an existing relationship",
+    schemaConnectPlaceholder: "Search relationships…",
+    schemaConnectAs: "As",
+    schemaConnect: "Connect",
+    schemaConnected: (label: string) => `Connected via ${label}.`,
   },
   mapping: {
     title: "Data mapping",
@@ -1315,6 +1405,9 @@ export const en = {
       escalate_no_verdict: "The adjudicator returned no verdict",
       escalate_entity_changed: "The entity changed while being adjudicated",
       escalate_unsure: "The adjudicator was not confident enough",
+      namesake: "Two entities with this name in one document",
+      /* 画像分不开时的并列：分数是真的，所以百分比照常显示（与 namesake 的哨兵值不同） */
+      namesake_tie: "Same name, and the profiles cannot tell them apart",
       /* 名字互相包含：等值召回看不见，简称会静默变成第二个实体 */
       contains: "One name contains the other",
       ambiguous_name: "Same name, context did not settle it",
@@ -1426,6 +1519,8 @@ export const en = {
     pendingNoPredicate: "The ontology has no relation for this; the word is the model's own.",
     pendingNoPredicateChip: "no relation in ontology",
     pendingSaidBy: (name: string) => `said by ${name}`,
+    /* 同一个人可以挂着好几个 agent，只写人名分不出是哪一个记的 */
+    pendingSaidVia: (name: string, agent: string) => `said by ${name} · via ${agent}`,
     nodCardTitle: (n: number) =>
       n === 1
         ? "One fact extracted from this. Confirm to add it to the graph, or reject."
@@ -1485,6 +1580,9 @@ export const en = {
     materialize: "Materialize inferences",
     materializeNote:
       "Write facts the ontology entails into the ledger — transitive chains and symmetric pairs. Off by default: a declaration can be wrong, and this one changes the graph. Derived facts are marked and can be taken back.",
+    autoResolveTypes: "Resolve entity types after extraction",
+    autoResolveTypesNote:
+      "After each document is extracted, run a round of type resolution on entities the engine has not looked at yet. Only refinements within the current class are applied on their own — a re-classification across the tree still waits for you on the Ontology page. Every batch is listed there and can be undone.",
     inferEvery: "Re-derive every",
     minutes: "minutes",
     lastInference: (when: string) => `last run ${when}`,
@@ -1580,6 +1678,7 @@ export const en = {
     systemAdmin: "System admin",
     remove: "Remove",
     deactivate: "Deactivate",
+    cancel: "Cancel",
     deactivateHint:
       "Cuts off access everywhere — sign-in and any token already issued. What they did stays attributed to them.",
     deactivatedTitle: "Deactivated accounts",

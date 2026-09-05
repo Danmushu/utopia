@@ -423,6 +423,14 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
         }
     }
 
+    let home = home_namespace(
+        classes
+            .iter()
+            .chain(obj_props.iter())
+            .chain(data_props.iter())
+            .map(String::as_str),
+    )
+    .unwrap_or_default();
     for iri in &classes {
         // **数据类型不是实体类型。** schema:Text 声明的是
         // `a rdfs:Class, schema:DataType`，只看前半截就会建出叫
@@ -430,9 +438,30 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
         if datatype_classes.contains(iri) {
             continue;
         }
+        // **光秃秃的外来声明不是这份词表的类。** schema.org 的 dump 里写着
+        // `snomed:105590001 a rdfs:Class .`——它只是某个 owl:equivalentClass 的对象：
+        // 没有标签、没有父类、没有任何属性指向它，命名空间也不是 schema.org 的。
+        // 建出来就是八个数字排在类列表最前面（#286）。这份词表对它一个字都没说，
+        // 所以不建，记进"未投影"让预览页说得出它去了哪儿。本命名空间的裸声明
+        // 照建：小词表常常只写 `a owl:Class`，那是它自己的类
+        let bare = !labels.contains_key(iri)
+            && !comments.contains_key(iri)
+            && parents.get(iri).is_none_or(|p| p.is_empty())
+            && !domains.values().any(|ds| ds.contains(iri))
+            && !ranges.values().any(|rs| rs.contains(iri));
+        if bare && namespace_of(iri) != home {
+            *proj
+                .unprojected
+                .entry("bare class declared outside the vocabulary's own namespace".to_string())
+                .or_insert(0) += 1;
+            continue;
+        }
+        // 先取真正的 label：编号式 IRI 的 key 要从它派生（#324）。
+        // 词汇表没给 label 时退回局部名，那也正是 key 的来源，行为不变
+        let declared_label = pick_lang(labels.get(iri));
         proj.classes.push(OwlClass {
-            key: key_from_iri(iri),
-            label: pick_lang(labels.get(iri)).unwrap_or_else(|| local_name(iri).to_string()),
+            key: key_from_iri_or_label(iri, declared_label.as_deref()),
+            label: declared_label.unwrap_or_else(|| local_name(iri).to_string()),
             description: pick_lang(comments.get(iri)).unwrap_or_default(),
             parents: parents.get(iri).cloned().unwrap_or_default(),
             disjoint_with: {
@@ -467,10 +496,10 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
         } else {
             !rs.is_empty() && rs.iter().all(|r| datatype_classes.contains(r))
         };
+        let declared_label = pick_lang(labels.get(iri));
         proj.properties.push(OwlProperty {
-            key: key_from_iri(iri),
-            label: pick_lang(labels.get(iri))
-                .unwrap_or_else(|| local_name(iri).replace('_', " ").to_string()),
+            key: key_from_iri_or_label(iri, declared_label.as_deref()),
+            label: declared_label.unwrap_or_else(|| local_name(iri).replace('_', " ").to_string()),
             description: pick_lang(comments.get(iri)).unwrap_or_default(),
             is_datatype,
             functional: functional.contains(iri),
@@ -503,31 +532,36 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
 /// 判据是**声明得最多的那个命名空间就是文件的主人**——不认 schema.org
 /// 这个名字，任何词汇表都适用。同数时取字典序小的，保证可重复。
 fn order_by_home_namespace(proj: &mut OwlProjection) {
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for iri in proj
-        .classes
-        .iter()
-        .map(|c| c.iri.as_str())
-        .chain(proj.properties.iter().map(|p| p.iri.as_str()))
-    {
-        *counts.entry(namespace_of(iri)).or_insert(0) += 1;
-    }
-    // max_by_key 取的是最后一个最大值，而 BTreeMap 按 key 升序——
-    // 于是同数时拿到字典序最大的那个。要的是最小的，所以自己比
-    let Some(home) = counts
-        .into_iter()
-        .fold(None::<(&str, usize)>, |best, (ns, n)| match best {
-            Some((_, bn)) if bn >= n => best,
-            _ => Some((ns, n)),
-        })
-        .map(|(ns, _)| ns.to_string())
-    else {
+    let Some(home) = home_namespace(
+        proj.classes
+            .iter()
+            .map(|c| c.iri.as_str())
+            .chain(proj.properties.iter().map(|p| p.iri.as_str())),
+    ) else {
         return;
     };
     // 稳定排序：只把主词汇表提到前面，其余保持原有的字典序
     proj.classes.sort_by_key(|c| namespace_of(&c.iri) != home);
     proj.properties
         .sort_by_key(|p| namespace_of(&p.iri) != home);
+}
+
+/// 一批 IRI 里声明得最多的命名空间，即"这份文件的主人"。
+///
+/// max_by_key 取的是最后一个最大值，而 BTreeMap 按 key 升序——
+/// 于是同数时拿到字典序最大的那个。要的是最小的，所以自己比
+fn home_namespace<'a>(iris: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for iri in iris {
+        *counts.entry(namespace_of(iri)).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .fold(None::<(&str, usize)>, |best, (ns, n)| match best {
+            Some((_, bn)) if bn >= n => best,
+            _ => Some((ns, n)),
+        })
+        .map(|(ns, _)| ns.to_string())
 }
 
 /// IRI 去掉局部名剩下的那段（含结尾的 `#` 或 `/`）。
@@ -612,11 +646,47 @@ pub fn local_name(iri: &str) -> &str {
     iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
 
+/// 局部名是不是**纯编号**——`BFO_0000144`、`CHEBI_15377`、`GO_0008150` 这种。
+///
+/// OBO 系的词汇表（OBO Foundry 两百余个，覆盖生命科学、制造、医疗）把标识放在
+/// IRI 里、把意思放在 `rdfs:label` 里。照 IRI 派生出来的 `bfo_0000144` 不含任何
+/// 信息，而 key 正是抽取时递给模型的那份类清单——模型认不出它，这个类就永远
+/// 不会有实体落进去，且导入是「成功」的，坏了也看不出来（#324）。
+///
+/// 判据卡得窄：**字母前缀 + 一个分隔符 + 至少三位数字**。schema.org 里那些带
+/// 数字却有意义的名字都不满足——`gtin12`、`sha256`、`percentile10` 没有分隔符，
+/// `emissionsCO2` 数字不在末尾，`3DModel` 压根不是这个形状。
+fn is_opaque_local_name(local: &str) -> bool {
+    let Some(pos) = local.rfind(['_', '-']) else {
+        return false;
+    };
+    let (prefix, digits) = (&local[..pos], &local[pos + 1..]);
+    !prefix.is_empty()
+        && prefix.chars().all(|c| c.is_ascii_alphabetic())
+        && digits.len() >= 3
+        && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 派生 key：局部名是纯编号且词汇表给了 label 时用 label，否则用局部名。
+///
+/// **IRI 始终是身份**，这里只换那个给模型读的标签，所以重导入、对齐、
+/// `e_by_iri` 的认领都不受影响。
+pub fn key_from_iri_or_label(iri: &str, label: Option<&str>) -> String {
+    match label {
+        Some(l) if is_opaque_local_name(local_name(iri)) && !l.trim().is_empty() => to_key(l),
+        _ => key_from_iri(iri),
+    }
+}
+
 /// 从 IRI 派生 key。**IRI 是身份，key 是给模型读的标签**（见 0001 P2）：
 /// 只允许 `[a-z0-9_]`、最长 40，所以 IRI 本身进不去。
 /// 驼峰拆成下划线：`hasEmployee` → `has_employee`。
 pub fn key_from_iri(iri: &str) -> String {
-    let local = local_name(iri);
+    to_key(local_name(iri))
+}
+
+/// 一段文本 → key 的字符规则：驼峰断词，非字母数字并成一个下划线，截断 40。
+fn to_key(local: &str) -> String {
     let mut out = String::with_capacity(local.len() + 4);
     let mut prev_lower = false;
     for c in local.chars() {
@@ -919,6 +989,39 @@ mod tests {
             .contains_key("http://www.w3.org/2002/07/owl#equivalentClass"));
     }
 
+    /// schema.org 把 `snomed:105590001 a rdfs:Class .` 这种 equivalentClass 的对象
+    /// 也声明成了类：没标签、没父类、没属性、不在自家命名空间。不建，但记账；
+    /// 自家命名空间里同样光秃秃的类照建
+    #[test]
+    fn a_bare_class_from_another_namespace_is_reported_not_projected() {
+        let ttl = r#"
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix ex: <http://acme.example/hr#> .
+            @prefix snomed: <http://purl.bioontology.org/ontology/SNOMEDCT/> .
+            ex:Employee a owl:Class ; rdfs:label "Employee" ; owl:equivalentClass snomed:105590001 .
+            ex:Person a owl:Class ; rdfs:label "Person" .
+            ex:Contractor a owl:Class .
+            snomed:105590001 a rdfs:Class .
+        "#;
+        let p = project(ttl.as_bytes(), RdfFormat::Turtle).unwrap();
+        let keys: Vec<&str> = p.classes.iter().map(|c| c.key.as_str()).collect();
+        assert!(keys.contains(&"employee") && keys.contains(&"person"));
+        assert!(
+            keys.contains(&"contractor"),
+            "自家的裸声明是自己的类：{keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k.chars().all(|c| c.is_ascii_digit())),
+            "{keys:?}"
+        );
+        assert_eq!(
+            p.unprojected
+                .get("bare class declared outside the vocabulary's own namespace"),
+            Some(&1)
+        );
+    }
+
     #[test]
     fn detects_rdfxml_that_opens_with_comments() {
         // FOAF 的官方文件就长这样：几十行 <!-- --> 之后才见 <rdf:RDF>。
@@ -943,6 +1046,64 @@ mod tests {
         assert_eq!(key_from_iri("http://x/hr#hasEmployee"), "has_employee");
         assert_eq!(key_from_iri("http://x/ns/Person"), "person");
         assert_eq!(key_from_iri("http://x#HTTP_Server"), "http_server");
+    }
+
+    /// 编号式 IRI 的 key 改从 label 来（#324）。这些词汇表把标识放在 IRI、
+    /// 把意思放在 label 里，照 IRI 派生出的 key 递给模型等于没给。
+    #[test]
+    fn an_opaque_iri_takes_its_key_from_the_label() {
+        let k = |iri, label| key_from_iri_or_label(iri, Some(label));
+        assert_eq!(
+            k(
+                "http://purl.obolibrary.org/obo/BFO_0000144",
+                "process profile"
+            ),
+            "process_profile"
+        );
+        assert_eq!(
+            k("http://purl.obolibrary.org/obo/CHEBI_15377", "water"),
+            "water"
+        );
+        assert_eq!(
+            k(
+                "http://purl.obolibrary.org/obo/GO_0008150",
+                "biological process"
+            ),
+            "biological_process"
+        );
+        // 没有 label 就没得选，退回 IRI——总比没有强，身份仍在 IRI 上
+        assert_eq!(
+            key_from_iri_or_label("http://purl.obolibrary.org/obo/BFO_0000144", None),
+            "bfo_0000144"
+        );
+        // 空 label 同样不算数
+        assert_eq!(
+            k("http://purl.obolibrary.org/obo/BFO_0000144", "   "),
+            "bfo_0000144"
+        );
+    }
+
+    /// 判据必须窄。schema.org 里带数字的名字都有意义，一个都不能被改写——
+    /// 有 label 的类占绝大多数，判据一宽就是整个词汇表的 key 全被换掉。
+    #[test]
+    fn a_meaningful_name_keeps_its_key_even_with_digits() {
+        let k = |iri, label| key_from_iri_or_label(iri, Some(label));
+        // 数字紧跟字母，没有分隔符
+        assert_eq!(k("https://schema.org/gtin12", "GTIN-12"), "gtin12");
+        assert_eq!(k("https://schema.org/sha256", "sha256"), "sha256");
+        assert_eq!(
+            k("https://schema.org/percentile10", "percentile 10"),
+            "percentile10"
+        );
+        // 数字不在末尾
+        assert_eq!(
+            k("https://schema.org/emissionsCO2", "emissions CO2"),
+            "emissions_co2"
+        );
+        // 分隔符后面不是数字
+        assert_eq!(k("http://x#HTTP_Server", "HTTP server"), "http_server");
+        // 数字不足三位：可能是有意义的编号（v2、Q1），不当编号处理
+        assert_eq!(k("http://x#part_12", "part twelve"), "part_12");
     }
 
     /// schema.org 那一套的最小复刻：数据类型自报家门，属性用
@@ -1245,6 +1406,41 @@ mod against_real_packs {
                 4,
                 "{key} 该与另外四个互斥,实得 {:?}",
                 c.disjoint_with
+            );
+        }
+    }
+
+    /// IOF Core 引用 BFO,而 BFO 的 IRI 是编号(`.../obo/BFO_0000144`)。
+    /// 照 IRI 派生的 `bfo_0000144` 递给模型等于没递——那个类会永远空着,
+    /// 而导入是「成功」的(#324)。这里钉的是**真包里那一个**:
+    /// 它的 `rdfs:label` 写着 "process profile"。
+    ///
+    /// 同时钉住反面:schema.org 那些带数字却有意义的 key 一个都不能被改写。
+    /// 判据一宽,受影响的就不是一个类而是整个词汇表——它的类几乎都有 label。
+    #[test]
+    fn an_opaque_iri_in_a_real_pack_reads_from_its_label() {
+        let p = project(&load("iof-core.rdf.gz"), RdfFormat::RdfXml).unwrap();
+        let c = p
+            .classes
+            .iter()
+            .find(|c| c.label == "process profile")
+            .expect("IOF Core 里那个 BFO 类该被投影出来");
+        assert_eq!(c.key, "process_profile", "编号式 IRI 该改用 label 派生 key");
+        assert!(
+            !p.classes.iter().any(|c| c.key.starts_with("bfo_0")),
+            "不该再有编号形态的 key，实得 {:?}",
+            p.classes
+                .iter()
+                .map(|c| &c.key)
+                .filter(|k| k.starts_with("bfo_0"))
+                .collect::<Vec<_>>()
+        );
+
+        let s = project(&load("schema-org.ttl.gz"), RdfFormat::Turtle).unwrap();
+        for key in ["gtin12", "gtin13", "sha256", "emissions_co2"] {
+            assert!(
+                s.properties.iter().any(|x| x.key == key),
+                "{key} 是有意义的名字，不该被当成编号改写"
             );
         }
     }

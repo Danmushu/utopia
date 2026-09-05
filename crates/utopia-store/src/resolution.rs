@@ -21,6 +21,12 @@ use uuid::Uuid;
 pub const SIM_ATTACH: f32 = 0.55;
 pub const SIM_NEW: f32 = 0.35;
 
+/// 同名并列的判定边界：两个**同名**候选的画像分数相差不超过这个值，就算「分不开」。
+/// 画像分不出谁是谁时，attach 到分高的那个只是候选顺序掷出的硬币（#270）——
+/// 与其掷硬币，不如两个都不并、都入人工审核。取值偏紧：真正拉得开的同名人（不同
+/// chunk、不同事实积累）分差远大于此，只有质心几乎重合（如同一 chunk 播种）才触发。
+pub const SIM_TIE_MARGIN: f32 = 0.02;
+
 /// 名称规范化：全角 ASCII → 半角、全角空格 → 半角、空白折叠。
 /// 返回展示形态（保留大小写）；匹配一律再套 SQL lower()。
 pub fn normalize_name(raw: &str) -> String {
@@ -175,6 +181,7 @@ fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
 #[derive(Debug, sqlx::FromRow)]
 struct Candidate {
     id: Uuid,
+    canonical_name: String,
     profile_embedding: Option<Vector>,
     profile_n: i32,
     degree: i64,
@@ -195,6 +202,26 @@ pub struct ReviewRequest {
     pub other_id: Uuid,
     pub score: f32,
     pub reason: String,
+    /// 交给谁裁：画像灰区走 [`ReviewStage::Adjudicating`]（批量裁决器），
+    /// 同名并列只有人分得开，走 [`ReviewStage::Human`]。
+    pub stage: ReviewStage,
+}
+
+/// 审核项由谁消费。普通画像灰区先交给批量裁决器；抽取器在同一回复里明确拆出的
+/// 同名实体只有人能判断，不能让几乎相同的画像触发自动合并。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewStage {
+    Adjudicating,
+    Human,
+}
+
+impl ReviewStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Adjudicating => "adjudicating",
+            Self::Human => "human",
+        }
+    }
 }
 
 /// 单条 mention 消解。`context` 为 mention 所在分块的向量（无 embedding 模型时为 None，
@@ -206,13 +233,16 @@ pub async fn resolve_mention(
     type_id: Option<Uuid>,
     raw_name: &str,
     context: Option<&[f32]>,
+    // Candidates already claimed by a different response-local handle. They remain stored
+    // and recallable on later calls, but this mention cannot attach to them.
+    exclude: &[Uuid],
 ) -> AppResult<Resolution> {
     let name = normalize_name(raw_name);
     // 召回键 = 本名 + 泛用后缀词干及其增广（"星尘"↔"星尘项目"互为候选）。
     // 只扩召回，归并与否仍由下方画像相似度分层定夺。
     let keys = recall_keys(&name);
     let candidates: Vec<Candidate> = sqlx::query_as(
-        "SELECT e.id, e.profile_embedding, e.profile_n,
+        "SELECT e.id, e.canonical_name, e.profile_embedding, e.profile_n,
                 (SELECT count(*) FROM facts f
                  WHERE (f.subject_id = e.id OR f.object_id = e.id)
                    AND f.invalidated_at IS NULL) AS degree
@@ -225,12 +255,15 @@ pub async fn resolve_mention(
     .bind(type_id)
     .bind(&keys)
     .fetch_all(pool)
-    .await?;
+    .await?
+    .into_iter()
+    .filter(|candidate: &Candidate| !exclude.contains(&candidate.id))
+    .collect();
 
     if candidates.is_empty() {
         // 同类型无候选 ≠ 新名字：类型标签会漂（同一团队被抽成 organization/project/
         // concept），先查其它类型下的同名实体，按类型对的互斥强度分流。
-        return resolve_type_drift(pool, kb_id, type_id, &name, &keys, context).await;
+        return resolve_type_drift(pool, kb_id, type_id, &name, &keys, context, exclude).await;
     }
 
     let Some(ctx) = context else {
@@ -248,7 +281,7 @@ pub async fn resolve_mention(
     };
 
     // 有画像的候选算相似度；无画像（历史数据/无 embedding 期创建）单独归类
-    let mut best_scored: Option<(&Candidate, f32)> = None;
+    let mut scored: Vec<(&Candidate, f32)> = Vec::new();
     let mut unprofiled: Option<&Candidate> = None;
     for c in &candidates {
         match c
@@ -256,11 +289,7 @@ pub async fn resolve_mention(
             .as_ref()
             .and_then(|p| cosine(p.as_slice(), ctx))
         {
-            Some(sim) => {
-                if best_scored.map(|(_, s)| sim > s).unwrap_or(true) {
-                    best_scored = Some((c, sim));
-                }
-            }
+            Some(sim) => scored.push((c, sim)),
             None => {
                 if unprofiled.map(|u| c.degree > u.degree).unwrap_or(true) {
                     unprofiled = Some(c);
@@ -268,9 +297,47 @@ pub async fn resolve_mention(
             }
         }
     }
+    // 最高分候选：并列时保留先遇到的那个（与旧的 `sim > s` 严格大于一致）
+    let best_scored = scored
+        .iter()
+        .copied()
+        .reduce(|acc, cur| if cur.1 > acc.1 { cur } else { acc });
 
     if let Some((best, sim)) = best_scored {
         if sim >= SIM_ATTACH {
+            // 同名并列的灰区：另有一个**同名**候选的分数贴着最高分（差 ≤ SIM_TIE_MARGIN），
+            // 画像分不出谁是谁——attach 到分高的那个只是候选顺序掷出的硬币（#270）。
+            // 宁分勿合：不 attach，新建实体，对并列的两个候选各入一条**人工**审核对。
+            // 分数无论多高都拦：高分并列正是静默错并的危险区，不能因为「够像」就放行。
+            if let Some((runner, r_sim)) = scored
+                .iter()
+                .copied()
+                .filter(|(c, s)| {
+                    // 同名比较要与召回一致地忽略大小写：召回用 SQL `lower()`，
+                    // 「Zhang Wei」与「zhang wei」本就是一对同名候选，不能漏。
+                    c.id != best.id
+                        && c.canonical_name.to_lowercase() == best.canonical_name.to_lowercase()
+                        && sim - *s <= SIM_TIE_MARGIN
+                })
+                .reduce(|acc, cur| if cur.1 > acc.1 { cur } else { acc })
+            {
+                let id = create_entity(pool, kb_id, type_id, &name, context).await?;
+                refresh_disambiguators(pool, kb_id, &name).await?;
+                let reviews = [(best, sim), (runner, r_sim)]
+                    .into_iter()
+                    .map(|(c, s)| ReviewRequest {
+                        other_id: c.id,
+                        score: s,
+                        reason: format!("namesake_tie|{s:.2}"),
+                        stage: ReviewStage::Human,
+                    })
+                    .collect();
+                return Ok(Resolution {
+                    entity_id: id,
+                    created: true,
+                    reviews,
+                });
+            }
             update_profile(pool, best.id, best.profile_n, ctx).await?;
             return Ok(Resolution {
                 entity_id: best.id,
@@ -299,6 +366,7 @@ pub async fn resolve_mention(
                 other_id: c.id,
                 score: sim,
                 reason: format!("ambiguous_name|{sim:.2}"),
+                stage: ReviewStage::Adjudicating,
             }]
         })
         .unwrap_or_default();
@@ -444,6 +512,7 @@ async fn containment_reviews(
                 other_id: id,
                 score,
                 reason: format!("contains|{other_name}"),
+                stage: ReviewStage::Adjudicating,
             }
         })
         .collect())
@@ -565,6 +634,7 @@ fn confusable_reviews(
                 other_id: c.id,
                 score: sim.unwrap_or(0.0),
                 reason: drift_reason(mention_key, c.type_key.as_deref(), sim),
+                stage: ReviewStage::Adjudicating,
             }
         })
         .collect()
@@ -582,6 +652,7 @@ async fn resolve_type_drift(
     name: &str,
     keys: &[String],
     context: Option<&[f32]>,
+    exclude: &[Uuid],
 ) -> AppResult<Resolution> {
     // 这一侧也可能还没判出类型（0009），那时没有 key 可查
     let mention_key: Option<String> = match type_id {
@@ -606,7 +677,10 @@ async fn resolve_type_drift(
     .bind(type_id)
     .bind(keys)
     .fetch_all(pool)
-    .await?;
+    .await?
+    .into_iter()
+    .filter(|candidate: &CrossCandidate| !exclude.contains(&candidate.id))
+    .collect();
 
     // 本体声明了互斥的类，一次取出（含继承）。声明优先于下面所有启发式
     let disjoint = declared_disjoint_from(pool, kb_id, type_id).await?;
@@ -698,6 +772,7 @@ async fn resolve_type_drift(
                 other_id: c.id,
                 score: sim.unwrap_or(0.0),
                 reason: drift_reason(mention_key.as_deref(), c.type_key.as_deref(), sim),
+                stage: ReviewStage::Adjudicating,
             }),
         }
     }
@@ -777,8 +852,27 @@ async fn update_profile(pool: &PgPool, id: Uuid, n: i32, ctx: &[f32]) -> AppResu
     Ok(())
 }
 
-/// 同名组展示消歧：组内 ≥2 个存活实体时，各自取最强区分性事实
-/// （works_at/part_of/located_in/leads 的宾语名），否则退回类型标签；组内唯一则清空。
+/// 同名组展示消歧：组内 ≥2 个存活实体时，各自取最能把自己和同名者分开的那条
+/// 事实的宾语名，否则退回类型标签；组内唯一则清空。
+///
+/// **不认谓词的名字**（#299）。原先这里写死 works_at / part_of / located_in / leads
+/// 四个 key，而 schema.org 包建出来的库用的是 works_for / member_of / affiliation
+/// ——于是两个明明分得清清楚楚的 John Smith（一个在 Acme Robotics，一个在
+/// St Mary's Hospital）双双退回类型标签，并排显示成两个 "John Smith · Person"。
+/// 一张手写的词表管不住别人的词汇表，这与 #193 那条「封闭动词表换个语料就漏」
+/// 是同一个毛病。
+///
+/// 换成按**这条事实分不分得开**排序，理由都来自本体自己的声明：
+///
+/// 1. **宾语在同名组里独一份**——后缀存在的全部意义就是这个。两个人都在 Acme
+///    时它谁也分不开，那就退到下面几条按信息量取，而不是编一个假的区分
+/// 2. **谓词声明过值域**（`relation_type_ranges`）——有人特意说过这条关系指向什么，
+///    比抽取顺手长出来的那些更可能是身份性的
+/// 3. **状态而非事件**（`temporal`）：「在哪儿工作」是身份，「某天开了个会」不是
+/// 4. **单值关系**（`functional`）：一个主语只能有一个值的关系，本身就是身份锚
+///
+/// 没有谓词的事实（`predicate_id IS NULL`，0010）不参与：原话留在证据里，
+/// 不是本体承认的说法，不该被当成一个人的身份写进后缀。
 pub async fn refresh_disambiguators(pool: &PgPool, kb_id: Uuid, name: &str) -> AppResult<()> {
     let group: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM entities
@@ -799,6 +893,7 @@ pub async fn refresh_disambiguators(pool: &PgPool, kb_id: Uuid, name: &str) -> A
         return Ok(());
     }
 
+    let peers: Vec<Uuid> = group.iter().map(|(id,)| *id).collect();
     for (id,) in &group {
         let label: Option<(String,)> = sqlx::query_as(
             "SELECT o.canonical_name FROM facts f
@@ -806,12 +901,22 @@ pub async fn refresh_disambiguators(pool: &PgPool, kb_id: Uuid, name: &str) -> A
              JOIN entities o ON o.id = f.object_id
              WHERE f.kb_id = $1 AND f.subject_id = $2
                AND f.invalidated_at IS NULL AND f.object_id IS NOT NULL
-               AND r.key IN ('works_at', 'part_of', 'located_in', 'leads')
-             ORDER BY (r.key = 'works_at') DESC, f.confidence DESC, f.recorded_at DESC
+             ORDER BY
+               -- 同名的另一个也指着它，这条就分不开谁是谁
+               (NOT EXISTS (SELECT 1 FROM facts g
+                             WHERE g.kb_id = $1 AND g.subject_id = ANY($3)
+                               AND g.subject_id <> $2 AND g.object_id = f.object_id
+                               AND g.invalidated_at IS NULL)) DESC,
+               EXISTS (SELECT 1 FROM relation_type_ranges rr
+                        WHERE rr.relation_type_id = r.id) DESC,
+               (r.temporal = 'state') DESC,
+               r.functional DESC,
+               f.confidence DESC, f.recorded_at DESC
              LIMIT 1",
         )
         .bind(kb_id)
         .bind(id)
+        .bind(&peers)
         .fetch_optional(pool)
         .await?;
         // 关联事实找不着就退到类型标签；**类型也可能没有**（0009），
@@ -848,13 +953,16 @@ pub async fn create_review(
     right_id: Uuid,
     score: f32,
     reason: &str,
+    stage: ReviewStage,
 ) -> AppResult<()> {
     sqlx::query(
-        "INSERT INTO resolution_reviews (id, kb_id, left_id, right_id, score, reason)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO resolution_reviews AS existing
+             (id, kb_id, left_id, right_id, score, reason, stage)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (kb_id, least(left_id, right_id), greatest(left_id, right_id))
              WHERE status = 'pending'
-         DO NOTHING",
+         DO UPDATE SET stage = 'human', reason = EXCLUDED.reason
+           WHERE EXCLUDED.stage = 'human' AND existing.stage = 'adjudicating'",
     )
     .bind(Uuid::now_v7())
     .bind(kb_id)
@@ -862,6 +970,7 @@ pub async fn create_review(
     .bind(right_id)
     .bind(score)
     .bind(reason)
+    .bind(stage.as_str())
     .execute(pool)
     .await?;
     Ok(())
@@ -1972,10 +2081,15 @@ pub struct TypeCandidateSubject {
 /// 值得送去精化类型的实体：**还没有类的**，或者模型报过一个词表外类型的。
 ///
 /// 类型化得已经很具体的实体不动——重判一次只有下降风险，没有上升空间。
+///
+/// `unattended` = 自动跑（0016 C2）：**跳过引擎已经看过的**（`type_resolved_at`）。候选按
+/// 事实数排序、一轮六十个，不跳过的话每一轮都是同一批，后面的永远轮不到。人点的那条
+/// 路传 false——人要的是把现状重新审一遍
 pub async fn entities_for_type_resolution(
     pool: &PgPool,
     kb_id: Uuid,
     limit: i64,
+    unattended: bool,
 ) -> AppResult<Vec<TypeCandidateSubject>> {
     Ok(sqlx::query_as(
         "SELECT e.id, e.canonical_name, e.aliases, t.key AS coarse_key, t.id AS coarse_id,
@@ -2029,13 +2143,28 @@ pub async fn entities_for_type_resolution(
            -- 唯一的用武之地。只看前两种就把它整个漏掉了
            AND (e.type_id IS NULL OR e.proposed_type IS NOT NULL OR e.specific_type IS NOT NULL
                 OR EXISTS (SELECT 1 FROM entity_type_parents p WHERE p.parent_id = t.id))
+           AND (NOT $3::bool OR e.type_resolved_at IS NULL)
          ORDER BY fact_count DESC, e.created_at
          LIMIT $2",
     )
     .bind(kb_id)
     .bind(limit)
+    .bind(unattended)
     .fetch_all(pool)
     .await?)
+}
+
+/// 引擎看过了：三档（改了 / 留给人 / 不动）都算看过，自动跑不再回头。
+/// 人手工改类、合并之类的写路径不清这个标记——它们本来也不在自动跑的候选里
+pub async fn mark_type_judged(pool: &PgPool, kb_id: Uuid, ids: &[Uuid]) -> AppResult<u64> {
+    Ok(sqlx::query(
+        "UPDATE entities SET type_resolved_at = now() WHERE kb_id = $1 AND id = ANY($2)",
+    )
+    .bind(kb_id)
+    .bind(ids)
+    .execute(pool)
+    .await?
+    .rows_affected())
 }
 
 /// 某个类的全部后代（含自身）。精化只能往粗类的后代走。

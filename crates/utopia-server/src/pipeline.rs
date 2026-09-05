@@ -3,6 +3,7 @@
 
 use crate::llm_util;
 use crate::state::AppState;
+use utopia_core::models::Proposer;
 use uuid::Uuid;
 
 const EMBED_BATCH: usize = 16;
@@ -23,6 +24,11 @@ pub async fn process_document(state: &AppState, document_id: Uuid) -> anyhow::Re
 
 async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
     let doc = utopia_store::documents::get(&state.pool, document_id).await?;
+    // 排队之后被删了（#268）：墓碑不重建分块、不回索引；清过的连原文都没了
+    if doc.deleted_at.is_some() {
+        tracing::info!(document = %document_id, "skipping a deleted document");
+        return Ok(());
+    }
 
     // 1. 解析（CPU 密集，放 blocking 线程）
     utopia_store::documents::set_status(&state.pool, document_id, "parsing").await?;
@@ -94,13 +100,18 @@ async fn run(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
 /// 重建全文索引、触发增量抽取（extracted_at 为空的新 chunk 才会被抽）。
 /// 免解析免分块——episode 落库时已是 chunk。
 ///
-/// `proposed_by`：说这句话的人。一路传到抽取，落在 `pending_facts.proposed_by`（0015）
+/// `proposer`：说这句话的人，以及经 MCP 时那个 agent。一路传到抽取，落在
+/// `pending_facts.proposed_by` / `proposed_token`（0015、0026）
 pub async fn memory_ingest(
     state: &AppState,
     document_id: Uuid,
-    proposed_by: Option<Uuid>,
+    proposer: Proposer,
 ) -> anyhow::Result<()> {
     let doc = utopia_store::documents::get(&state.pool, document_id).await?;
+    if doc.deleted_at.is_some() {
+        tracing::info!(document = %document_id, "skipping a deleted document");
+        return Ok(());
+    }
     let kb_row = utopia_store::kbs::get(&state.pool, doc.kb_id).await?;
     let settings = utopia_store::settings::get(&state.pool, kb_row.workspace_id).await?;
 
@@ -138,7 +149,11 @@ pub async fn memory_ingest(
         utopia_store::jobs::enqueue(
             &state.pool,
             "extract_document",
-            serde_json::json!({ "document_id": document_id, "proposed_by": proposed_by }),
+            serde_json::json!({
+                "document_id": document_id,
+                "proposed_by": proposer.user_id,
+                "proposed_token": proposer.token_id,
+            }),
         )
         .await?;
     }

@@ -23,6 +23,7 @@ mod pack_alignment;
 mod pipeline;
 mod predicate_match;
 mod query_engine;
+mod rdf;
 mod retrieval;
 mod state;
 mod type_resolution;
@@ -35,12 +36,19 @@ use utopia_core::config::AppConfig;
 use utopia_search::SearchIndex;
 use uuid::Uuid;
 
-/// 记忆那条路带着「谁说的」（0015）；别的任务没有这个字段，读到 None 本就该如此
-fn payload_proposed_by(payload: &serde_json::Value) -> Option<Uuid> {
-    payload
-        .get("proposed_by")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
+/// 记忆那条路带着「谁说的」（0015、0026）；别的任务没有这两个字段，
+/// 读到默认值本就该如此
+fn payload_proposer(payload: &serde_json::Value) -> utopia_core::models::Proposer {
+    let uuid = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+    };
+    utopia_core::models::Proposer {
+        user_id: uuid("proposed_by"),
+        token_id: uuid("proposed_token"),
+    }
 }
 
 fn payload_document_id(payload: &serde_json::Value) -> anyhow::Result<Uuid> {
@@ -79,6 +87,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let pool = utopia_store::db::connect(&cfg.database_url, cfg.db_max_connections).await?;
+
+    // 凭据封印钥匙：环境变量优先，否则数据目录下的 secret.key（首次启动生成）。
+    // **钥匙不进库**——库泄漏不等于凭据泄漏，是这一层的全部意义。空串按未设置处理，
+    // 理由同下面的 JWT 密钥
+    let secret_key = match cfg.secret_key.clone().filter(|s| !s.trim().is_empty()) {
+        Some(text) => utopia_core::secrets::parse_key(&text).ok_or_else(|| {
+            anyhow::anyhow!("UTOPIA_SECRET_KEY must be 32 bytes, as 64 hex characters or base64")
+        })?,
+        None => secret_key_file(std::path::Path::new(&cfg.data_dir))?,
+    };
+    utopia_core::secrets::init(secret_key);
+    // 升级前落库的明文凭据在这里补封
+    let sealed = utopia_store::sealing::backfill(&pool).await?;
+    if sealed > 0 {
+        tracing::info!(rows = sealed, "凭据补封完成");
+    }
 
     let index_dir = std::path::Path::new(&cfg.data_dir).join("index");
     let search = Arc::new(SearchIndex::open(&index_dir)?);
@@ -313,7 +337,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
         }
         "memory_ingest" => {
             let id = payload_document_id(&job.payload)?;
-            pipeline::memory_ingest(st, id, payload_proposed_by(&job.payload)).await
+            pipeline::memory_ingest(st, id, payload_proposer(&job.payload)).await
         }
         "explore_mappings" => {
             let kb_id: Uuid = job
@@ -360,7 +384,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
         }
         "extract_document" => {
             let id = payload_document_id(&job.payload)?;
-            extraction::extract_document(st, id, payload_proposed_by(&job.payload)).await
+            extraction::extract_document(st, id, payload_proposer(&job.payload)).await
         }
         "bootstrap_ontology" => {
             let kb_id: Uuid = job
@@ -383,6 +407,15 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
             ontology_index::refresh(st, kb_id).await.map(|_| ())
         }
+        "resolve_types" => {
+            let kb_id: Uuid = job
+                .payload
+                .get("kb_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+            type_resolution::resolve_types_job(st, kb_id).await
+        }
         "adjudicate_entities" => {
             let kb_id: Uuid = job
                 .payload
@@ -403,4 +436,32 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
         }
         other => anyhow::bail!("未知任务类型: {other}"),
     }
+}
+
+/// 数据目录下的封印钥匙：有就读，没有就生成一把写进去（unix 下 0600）。
+/// 读出来解析不了就报错停下——静默生成一把新的会让库里已封的凭据全部打不开
+fn secret_key_file(data_dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
+    let path = data_dir.join("secret.key");
+    if path.exists() {
+        let text = std::fs::read_to_string(&path)?;
+        return utopia_core::secrets::parse_key(&text).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} does not hold a 32-byte key (64 hex characters or base64)",
+                path.display()
+            )
+        });
+    }
+    std::fs::create_dir_all(data_dir)?;
+    let key = utopia_core::secrets::generate_key();
+    std::fs::write(&path, utopia_core::secrets::key_to_hex(&key))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    tracing::info!(
+        "生成了凭据封印钥匙: {}（备份数据目录时一起带走；UTOPIA_SECRET_KEY 可覆盖）",
+        path.display()
+    );
+    Ok(key)
 }

@@ -26,7 +26,11 @@ axum = { version = "0.8", features = ["multipart"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate", "macros",
+    # mysql 只为问数引擎而开（query_engine::mysql）：一条线协议顺带覆盖
+    # TiDB / OceanBase / Doris / StarRocks。本体的库始终是 postgres。
+    # bigdecimal 是 DECIMAL 唯一的读法——驱动把 DECIMAL 同时挡在 f64 和 String
+    # 之外（"floating-point numbers have different semantics"），没有它金额列会整列变 null
+    "runtime-tokio", "tls-rustls", "postgres", "mysql", "bigdecimal", "uuid", "chrono", "json", "migrate", "macros",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,6 +39,11 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 argon2 = { version = "0.5", features = ["std"] }
+# 凭据静态加密（core::secrets）：AES-256-GCM，钥匙不进库
+aes-gcm = "0.10"
+base64 = "0.23"
+# 密钥比对（sources 的推送密钥）：常量时间。已随 aes-gcm 进依赖树，显式列出
+subtle = "2"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 figment = { version = "0.10", features = ["env"] }
 dotenvy = "0.15"
@@ -78,6 +87,7 @@ csv = "1"
 oxttl = "0.2"
 oxrdfxml = "0.2"
 oxrdf = "0.3"
+oxrdfio = "0.2"
 async-stream = "0.3"
 futures-util = "0.3"
 tokio-stream = "0.1"

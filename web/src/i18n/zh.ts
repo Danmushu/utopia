@@ -232,6 +232,19 @@ export const zh: Strings = {
     reportIssue: "反馈问题",
     refresh: "刷新",
   },
+  /* 空状态的共用文案（#313）：状态一句话，动作在按钮上，不解释原理 */
+  steps: {
+    noModel: "还没配置对话模型。",
+    noModelAsk: "还没配置对话模型，请联系管理员。",
+    configureModel: "配置模型",
+    noDocs: "还没有文档。",
+    upload: "上传文档",
+    processing: (n: number) => `正在读取 ${n} 份文档…`,
+    viewProgress: "查看进度",
+    someFailed: (n: number) => `${n} 份文档处理失败。`,
+    nothingExtracted: "还没抽取出内容。",
+    openLibrary: "打开文库",
+  },
   login: {
     signIn: "登录",
     signUp: "注册",
@@ -284,7 +297,7 @@ export const zh: Strings = {
         {
           h: "留存与删除",
           body: [
-            "删除一篇文档会把它移出知识库，并让只以它为出处的事实一并失效；另有出处的事实保留，出处照旧。内容会留着以便撤销：删除可以恢复，重新上传同一份文件也会恢复它。删除一个知识库会永久移除它的文档、图谱与来源。",
+            "删除一篇文档会把它移出知识库，并让只以它为出处的事实一并失效；另有出处的事实保留，出处照旧。内容会留着以便撤销：删除可以恢复，重新上传同一份文件也会恢复它。知识库管理员可以清除已删除的文档，其存储内容将被彻底移除。删除一个知识库会永久移除它的文档、图谱与来源。",
           ],
         },
         {
@@ -340,6 +353,17 @@ export const zh: Strings = {
       n === 0 ? "文档已删除" : `文档已删除 · 随之失效 ${n} 条事实`,
     undo: "撤销",
     restored: "文档已恢复",
+    deleted: "已删除",
+    colDeleted: "删除时间",
+    restore: "恢复",
+    purge: "清除",
+    purgeTitle: "清除这篇文档？",
+    purgeHint: (name: string) =>
+      `「${name}」已删除，内容还留着以便撤销。清除会把原文、分块与证据引文彻底移除；` +
+      "随它失效的事实保持失效，删除记录保留。此操作不可撤销。",
+    purgeConfirm: "清除",
+    purged: "内容已清除",
+    deletedEmpty: "没有已删除的文档。删掉的文档会在这里等着被恢复或清除。",
     title: "文库",
     upload: "上传文件",
     uploading: "上传中…",
@@ -390,6 +414,7 @@ export const zh: Strings = {
       truncated_reply: "模型的输出被截断",
       domain_mismatch: "主语对不上这个关系，对调也不行",
       not_an_entity_name: "那个名字是一句话，不是一个东西",
+      clause_suspect: "已保留，但这个名字像从句：给守卫攒的样本",
       direction_corrected: "已按签名把主宾掰正",
     },
     reExtractSource: "重新抽取",
@@ -637,11 +662,6 @@ export const zh: Strings = {
     searchEntity: "搜索实体…",
     searchInSubgraph: "在子图中搜索…",
     backToOverview: "← 全图",
-    emptyBody:
-      "图谱是空的。请管理员先配置对话模型，然后在「文库」中上传文档——实体与关系会被自动抽取。",
-    emptyBodyAdmin:
-      "图谱是空的。请先在「管理 → 模型」里配置对话模型，然后在「文库」中上传文档——实体与关系会被自动抽取。",
-    emptyOpenModels: "打开「管理 → 模型」",
     facts: "条事实",
     noFacts: "这个实体还没有事实",
     confidence: "置信度",
@@ -674,6 +694,7 @@ export const zh: Strings = {
     sameNameNote: (n: number) => `另有 ${n} 个实体同名。`,
     sameNameHint: "如果它们是同一个东西，去「审阅」里合并。",
     mergeInto: "并入",
+    mergeTitle: "合并实体",
     mergeIntoHint: "把那个实体并进这一个。它的事实搬过来；合并可以撤销。",
     mergeConfirm: (from: string, into: string) =>
       `把「${from}」并进「${into}」？它的事实会搬过来。可以在审阅页撤销。`,
@@ -747,8 +768,24 @@ export const zh: Strings = {
     timelineEmpty: "还没有带日期的事实。",
     lastConfirmed: (d: string) => `${d} 确认`,
     correctedHint:
-      "这个区间是被调和过程闭合的（自动接续或一次审阅决定），并非文档里逐字这么写。" +
-      "被取代的那条断言仍留在台账里。",
+      "这个区间来自一次修正，并非文档里逐字这么写：自动接续、审阅决定，或有人手工改过。" +
+      "被取代的那条断言仍留在台账里——谁改的、何时改的见「变更」。",
+    editTime: "修正区间",
+    timeStart: "起点",
+    timeEnd: "终点",
+    timeEndOpen: "仍在持续",
+    timeEndUnknown: "已结束，日期不详",
+    timeEndDate: "结束于",
+    timeFormat: "2023、2023-06 或 2023-06-15",
+    timeBadDate: "请写成 2023、2023-06 或 2023-06-15。",
+    timeNote: "原因（选填）",
+    timeNotePlaceholder: "文档说的是 2023 年上半年",
+    timeSave: "保存",
+    timeCancel: "取消",
+    timeSaved: "区间已修正",
+    timeSavedClosed: (n: number) => `区间已修正——顺带闭合了 ${n} 条现行事实`,
+    timeSavedConflicts: (n: number) =>
+      `区间已修正——${n} 条冲突待在审阅里裁决`,
     ongoing: "至今",
     endedUnknown: "已结束（时间不详）",
     stats: (n: number, e: number, active: number | null) =>
@@ -825,6 +862,7 @@ export const zh: Strings = {
       connString: "连接串，前缀决定引擎",
       connSchemes:
         "postgres://user:pass@host:5432/db\n" +
+        "mysql://user:pass@host:3306/db   （MariaDB、TiDB、OceanBase、Doris、StarRocks）\n" +
         "trino://user[:pass]@host:8080/catalog[/schema]   （Iceberg、Delta Lake、Hive）\n" +
         "databricks://:TOKEN@host/sql/1.0/warehouses/ID?catalog=main\n" +
         "snowflake://:TOKEN@account.snowflakecomputing.com/DB/SCHEMA?warehouse=WH",
@@ -834,6 +872,7 @@ export const zh: Strings = {
       testFail: "失败",
       neverTested: "未测试",
       remove: "移除",
+      empty: "还没有注册数据源。在下面注册一个。",
       grants: "可用于",
       grantsHint:
         "授权哪些工作区可以用这个源。**授权之后，那些工作区的知识库管理员自己挑挂不挂**——" +
@@ -862,6 +901,7 @@ export const zh: Strings = {
       visRestricted: "仅受邀者",
       create: "创建",
       openSettings: "设置",
+      empty: "还没有知识库。在上面建第一个。",
       docs: (n: number) => `${n} 篇文档`,
     },
     modelsIntro:
@@ -917,8 +957,6 @@ export const zh: Strings = {
     description: "描述",
     descriptionHint:
       "指导抽取器：什么属于这里，配上几个例子。它会被原样送进抽取提示词。",
-    overviewHint: "抽取器遵循的模式。在左侧选一个类或属性来编辑，或用 + 新建。",
-    overviewStats: (c: number, p: number) => `${c} 个类 · ${p} 个属性`,
     attributes: "属性",
     attributesHint:
       "这个类的字面值字段（一个人的薪资、一份合同的金额）。和任何事实一样带证据与历史。",
@@ -931,7 +969,7 @@ export const zh: Strings = {
       text: "文本",
       number: "数字",
       date: "日期",
-      bool: "是 / 否",
+      bool: "布尔",
     },
     cancel: "取消",
     key: "Key",
@@ -943,7 +981,7 @@ export const zh: Strings = {
     disjoint: "不可能同时是",
     disjointHint:
       "任何东西不可能同时属于的类。人不是组织。一致性检查据此找出永远不可能有实例的类。",
-    noDisjoint: "没有排除任何类",
+    noDisjoint: "尚未声明",
     disjointWithParent:
       "这个类继承自一个它声明不可能是的类——没有任何东西能满足它。",
     primaryParentHint: "左栏的树里挂在第一个下面。",
@@ -1071,6 +1109,35 @@ export const zh: Strings = {
       `有几个没能加入：${keys.join("、")}——其余的已经成功。`,
     proposals: "AI 提案",
     keyHint: "小写下划线命名",
+    /* ---- 模式图 ---- */
+    schemaDiagram: "模式图",
+    schemaSearchPlaceholder: "搜索模式…",
+    schemaEmpty: "还没有类。文档进来时会自动补上。",
+    schemaFitView: "归位",
+    schemaZoomIn: "放大",
+    schemaZoomOut: "缩小",
+    schemaLegendInheritance: "继承",
+    schemaLegendRelation: "关系",
+    schemaLegendDisjoint: "互斥",
+    schemaUnscoped: (n: number) => `未限定的属性（${n}）`,
+    schemaUnscopedHint: "没有限定在具体的类上，画到画布上的连线会是本体没说过的话。选一个来查看或编辑。",
+    schemaClosePanel: "关闭",
+    schemaTabDefinition: "定义",
+    schemaTabProperties: "属性",
+    schemaTabInstances: "实例",
+    schemaAddRelationship: "新建关系…",
+    schemaCheckDefects: (n) =>
+      n === 1 ? "这次改动带来 1 个新的本体问题" : `这次改动带来 ${n} 个新的本体问题`,
+    schemaCheckReview: "去审阅",
+    schemaRelationships: "关系",
+    schemaOutgoing: "从这个类出发",
+    schemaIncoming: "指向这个类",
+    schemaNoRelationships: "还没有关系。",
+    schemaConnectHint: "用一个已有的关系连接",
+    schemaConnectPlaceholder: "搜索关系…",
+    schemaConnectAs: "作为",
+    schemaConnect: "连接",
+    schemaConnected: (label) => `已通过 ${label} 连接。`,
   },
   mapping: {
     title: "数据映射",
@@ -1176,6 +1243,8 @@ export const zh: Strings = {
       escalate_no_verdict: "裁决没有给出结论",
       escalate_entity_changed: "裁决过程中实体发生了变化",
       escalate_unsure: "裁决的把握不够",
+      namesake: "同一篇文档里有两个同名实体",
+      namesake_tie: "同名，画像分不出谁是谁",
       contains: "一个名字包含另一个",
       ambiguous_name: "同名，但上下文没能定夺",
       type_drift: "同名，但类型不同",
@@ -1274,6 +1343,7 @@ export const zh: Strings = {
     pendingNoPredicate: "本体里没有这个关系，这个词是模型自己的说法。",
     pendingNoPredicateChip: "本体里没有这个关系",
     pendingSaidBy: (name: string) => `${name} 说的`,
+    pendingSaidVia: (name: string, agent: string) => `${name} 说的 · 经 ${agent}`,
     nodCardTitle: (n: number) =>
       n === 1 ? "从这句话里抽出 1 条事实。确认进图，或驳回。" : `从这句话里抽出 ${n} 条事实。确认进图，或驳回。`,
     lowConfidenceHint:
@@ -1327,6 +1397,9 @@ export const zh: Strings = {
     materialize: "物化推理",
     materializeNote:
       "把本体蕴含的事实写进账本——传递链与对称对。默认关：声明可能是错的，而这一步会改图。派生事实带标记，也随时可以撤回。",
+    autoResolveTypes: "抽取后自动消解实体类型",
+    autoResolveTypesNote:
+      "每篇文档抽完，对引擎还没看过的实体跑一轮类型消解。只有在现类子树里精化的才自动落地，跨轴的改判仍留在本体页等你。每一批都列在本体页，随时可以撤回。",
     inferEvery: "每隔",
     minutes: "分钟重推",
     lastInference: (when: string) => `上次 ${when}`,
@@ -1413,6 +1486,7 @@ export const zh: Strings = {
     systemAdmin: "系统管理员",
     remove: "移除",
     deactivate: "停用账号",
+    cancel: "取消",
     deactivateHint:
       "断掉整个系统的访问——登录与已签发的 token 都失效。他做过的事仍然记在他名下。",
     deactivatedTitle: "已停用的账号",

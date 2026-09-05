@@ -5,6 +5,7 @@ mod chat;
 mod datasource_routes;
 pub(crate) mod documents_routes;
 mod events_routes;
+mod export_routes;
 mod graph_routes;
 mod jobs_routes;
 mod kbs;
@@ -85,8 +86,13 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
             "/kbs/{id}",
             patch(kbs::update).get(kbs::get_one).delete(kbs::delete),
         )
+        // 四个页面的空状态共用的一步判断（#313）
+        .route("/kbs/{id}/readiness", get(kbs::readiness))
         .route("/kbs/{id}/members", get(kbs::members))
         .route("/kbs/{id}/audit", get(kbs::audit_log))
+        // 整库导出为 RDF（0020）。viewer 就能导：能看见的东西本来就能一条条抄走，
+        // 拦在这里只是让诚实的人多花点力气
+        .route("/kbs/{id}/export", get(export_routes::export))
         // 失败任务回队列（#216）：库内给 Editor，全局给管理员
         .route("/kbs/{id}/jobs/failed", get(jobs_routes::failed_in_kb))
         .route("/kbs/{id}/jobs/requeue", post(jobs_routes::requeue_in_kb))
@@ -278,6 +284,8 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         )
         // 撤销删除（#268）：删除是墓碑，所以有得撤
         .route("/documents/{id}/restore", post(documents_routes::restore))
+        // 真删（#268 下半）：只对已删除的开放，库管理员
+        .route("/documents/{id}/purge", post(documents_routes::purge))
         .route("/documents/{id}/extract", post(graph_routes::extract))
         .route("/kbs/{id}/graph/overview", get(graph_routes::overview))
         .route(
@@ -296,6 +304,11 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
         .route(
             "/kbs/{id}/facts/{fact_id}/evidence",
             get(graph_routes::fact_evidence),
+        )
+        // 人工修正有效区间（302）：与实体的 PATCH 对称，走账本不原地改
+        .route(
+            "/kbs/{id}/facts/{fact_id}",
+            patch(graph_routes::update_fact_time),
         )
         // 派生事实的证明（0002 R2）：前提按顺序展开到原句
         .route(

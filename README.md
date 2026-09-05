@@ -53,7 +53,7 @@ One Rust binary and one Postgres. Full-text search is embedded in the binary, ve
 | | |
 |---|---|
 | **A complete application** | A system console, a graph browser and an ontology workbench in one web UI. A product, not a library: install it and it works. |
-| **Knowledge ingest** | Upload PDF, DOCX, PPTX, XLSX, XLS, ODS, CSV, TSV, Markdown, HTML or plain text, with legacy encodings detected on the way in. Web pages, RSS, GitHub, Jira and S3-compatible buckets sync on a schedule; everything else comes in through the API. |
+| **Knowledge ingest** | Upload PDF, DOCX, PPTX, XLSX, XLS, ODS, CSV, TSV, Markdown, HTML or plain text, with legacy encodings detected on the way in. Web pages, RSS, GitHub, Jira, Notion, WebDAV and S3-compatible buckets sync on a schedule; everything else comes in through the API. |
 | **Search and chat** | Full-text on Tantivy, vectors on pgvector, fused with RRF. Answers stream with inline citations that open the passage they came from. Any OpenAI-compatible endpoint works (DeepSeek, Qwen, GLM, Ollama, vLLM), so the whole system can run air-gapped. |
 | **Agent harness and agentic RAG** | The whole system can be driven through conversation. The built-in agent searches documents, walks the graph (an entity's facts as of any date, or what changed in a period) and queries a mounted database. The same read-only tools are exposed over MCP. |
 | **Ontology and cold start** | A new knowledge base has no vocabulary of its own; it starts from the packs you pick at creation. Five ship inside the binary: schema.org, W3C Org, PROV-O, FOAF and IOF Core ([ask for your industry](https://github.com/deeplethe/utopia/issues/new?labels=enhancement&title=Ontology%20pack%20request)). Terms outside the packs are counted as they appear; confirm the common ones and they join the ontology. |
@@ -61,7 +61,7 @@ One Rust binary and one Postgres. Full-text search is embedded in the binary, ve
 | **Entity resolution and review** | Duplicates are resolved in three stages: exact name or alias, embedding similarity, then a model's call on the doubtful pairs. Every merge can be undone. Uncertain cases go to a review queue: low-confidence extractions, suspected duplicates and cardinality conflicts. |
 | **Reasoning and derivation** | Ontology axioms compile into rules: transitivity, symmetry, inverses and relation hierarchy derive new facts by forward chaining. Derivation is off by default, since a wrong axiom derives wrong facts. A derived fact is marked as such on the graph, carries validity and confidence like any other, and shows what it was derived from. When it contradicts an asserted fact, the asserted one stands. |
 | **Conflict detection** | Three kinds of conflict, three sets of choices. A new fact that clashes with an older one: close the old, keep both, or reject the new. Data that breaks an axiom (self-loop, asymmetry, transitive cycle, cardinality): retract the fact, relax the axiom, or accept both. The ontology itself is checked first, because violations of a self-contradictory ontology are noise. |
-| **Ontology-driven querying** | Mount a database on a base (Postgres, Trino for Iceberg / Delta Lake / Hive, Databricks, Snowflake) and chat can query it alongside the documents. The agent proposes how its tables map onto the ontology, and you confirm. The method behind it, [Ontology2SQL](https://github.com/deeplethe/ontology2sql), is state of the art on BIRD Mini-Dev for SQLite and PostgreSQL ([submission](https://github.com/bird-bench/bird-bench.github.io/pull/218)). |
+| **Ontology-driven querying** | Mount a database on a base (Postgres, MySQL and the engines that speak its protocol, Trino for Iceberg / Delta Lake / Hive, Databricks, Snowflake) and chat can query it alongside the documents. The agent proposes how its tables map onto the ontology, and you confirm. The method behind it, [Ontology2SQL](https://github.com/deeplethe/ontology2sql), is state of the art on BIRD Mini-Dev for SQLite and PostgreSQL ([submission](https://github.com/bird-bench/bird-bench.github.io/pull/218)). |
 | **Multi-user and permissions** | Each knowledge base has its own members and roles: owner, admin, editor and viewer. Open bases are readable by everyone in the deployment, restricted ones only by invitation. The first account registered becomes the system administrator. |
 | **Decision ledger** | Confirming or rejecting a fact, merging or reverting an entity, rebuilding the graph: each leaves a record of who, when, and what the object looked like at the time. The ledger is append-only, and a record outlives its object, even the base it belonged to. |
 | **[Decision intelligence (in development)](#roadmap)** | Record a decision, replay both what was understood and the course it took, and reason over overlaid scenarios. |
@@ -78,7 +78,7 @@ cd utopia
 docker compose --profile app up -d
 ```
 
-Open http://localhost:1516 and register. The first account automatically becomes the administrator, and a public knowledge base readable by everyone is created at the same time. Before extracting business documents, configure the model endpoints (chat and embedding) under system settings.
+Open http://localhost:1516 and register. The first account automatically becomes the administrator, and a public knowledge base readable by everyone is created at the same time. Before extracting business documents, configure the model endpoints (chat and embedding) under Administration → Models.
 
 Or build from source:
 
@@ -102,9 +102,10 @@ cd web && pnpm install && pnpm dev
 ## Roadmap
 
 - [ ] **Decision reasoning**: constraint computation, and replaying a decision after the fact
+- [ ] **Business rules**: rules written by people over an entity's attribute facts, a threshold or a category set, that classify it as a derived fact with the rule and the premises as its explanation ([#277](https://github.com/deeplethe/utopia/issues/277))
 - [ ] **Execution gate**: checking an agent's calls against ontology rules and symbolic logic
 - [ ] **MaxCompute**: mapping exploration and Ontology2SQL over Alibaba Cloud MaxCompute (Iceberg / Delta Lake via Trino, Databricks and Snowflake are in, awaiting a run against a real cluster)
-- [ ] **More sources**: MySQL, ClickHouse and Doris drivers; S3, WebDAV, Notion and Feishu connectors
+- [ ] **More sources**: a ClickHouse driver; a Feishu connector
 - [ ] **Time to the moment**: an `instant` precision beside year / month / day, for sources that carry a real timestamp. Today a connector rounds it to a UTC day, which can shift an event across midnight by one day
 - [ ] **Agent memory over MCP**: episode writes, the retrieve endpoint, and the MCP server
 - [ ] **Enterprise**: OIDC SSO, backup and restore commands, benchmarks at 100k documents

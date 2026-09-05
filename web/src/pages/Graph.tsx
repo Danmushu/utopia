@@ -16,7 +16,25 @@ import Sigma from "sigma";
 import { createNodeBorderProgram } from "@sigma/node-border";
 import EdgeCurveProgram from "@sigma/edge-curve";
 import { NodeSquareShellProgram } from "./squareShellProgram";
+import {
+  drawHoverCard,
+  drawPillLabel,
+  drawWorldGrid,
+  hexToRgb,
+  HOVER_MUTE,
+  mix,
+  MUTED_SHELL,
+  NODE_BORDER_BASE,
+  NODE_CORE_BASE,
+  NODE_CORE_MIX,
+  NODE_SHELL_BASE,
+  NODE_TINT_MIX,
+  RING_HOVER_MIX,
+  RING_SELECT_MIX,
+  TRANSPARENT,
+} from "./graphVisuals";
 import { EntityHistory } from "./EntityHistory";
+import { NextStep, nextStep, useReadiness } from "./NextStep";
 import {
   ArrowLeft,
   ArrowRight,
@@ -45,31 +63,11 @@ import {
   type ProofStep,
 } from "../api";
 import { S } from "../i18n";
+import { Button, DangerConfirm, Input, localDate } from "../ui";
 import { usePopoverFlip } from "../ui/popoverFlip";
 import { useKb, useKbId } from "../kb";
 import { toast } from "../toast";
 
-/* 画布调色板 —— 结构取自 Semantica GraphWorkspace 源码；基色已中性化：
-   Semantica 原版是钢蓝系（#0B1320/#5A7A9E/#7A92AE），按"chrome 零色偏、
-   彩色只属于数据"的既定原则换成同明度纯灰，类型色混入比例不变 */
-const NODE_SHELL_BASE = "#121212"; // 节点外壳深底（原 #0B1320 的中性化）
-const NODE_CORE_BASE = "#767676"; // 节点核心灰（原 #5A7A9E 的中性化）
-const NODE_BORDER_BASE = "#909090"; // 节点描边（原 #7A92AE 的中性化）
-const NODE_TINT_MIX = 0.14; // 类型色只按 14% 混入外壳（高级感的关键）
-const NODE_CORE_MIX = 0.5; // 核心向类型色的混入比例
-/* 状态环取**节点自己的类型色**，不是两个写死的色相。
-
-   换掉的直接原因是一次撞色：原来的选中金环 `#E7C57C` 就是
-   `rgb(231,197,124)`，与 `EDGE_COLOR_DERIVED` 逐位相同——「这个节点被选中了」
-   和「这条边是推出来的」用同一个颜色说话，而这两件事毫无关系。
-   金色现在专属于「推出来的」。
-
-   往白里混而不是直接用原色：环画在节点自己身上，同色同亮度就看不出是个环。
-   **悬停混得更白、选中混得更少**——悬停时全图不压暗，环要在一片乱线里
-   立刻跳出来；选中时其余都压暗了，节点本来就孤立着，这时候环该说的是
-   「它是谁」，所以更贴近它自己的颜色。 */
-const RING_HOVER_MIX = 0.7; // 悬停：偏白，为的是跳出来
-const RING_SELECT_MIX = 0.35; // 选中：偏本色，为的是认得出
 const EDGE_COLOR = "rgba(163,163,163,0.2)"; // 纯灰（应用户要求，不用钢蓝）
 // 本体没认下的关系：同色更淡。名字来自原文，不该跟词表里的关系看着一样重
 const EDGE_COLOR_INFERRED = "rgba(163,163,163,0.1)";
@@ -210,33 +208,7 @@ const EDGE_FOCUS = "rgba(255,255,255,0.55)";
 // 从前一律 EDGE_FOCUS，一选中金线就变白，等于把来历抹掉了。
 // 比常态的金更亮更实——它同样要表达「被选中了」
 const EDGE_FOCUS_DERIVED = "rgba(255,214,140,0.95)";
-const MUTED_SHELL = "#151515";
-/* 悬停时其余的压暗程度。**比选中轻**（选中是压到底）：
-   悬停是随鼠标走的、每划过一个节点就换一次，压到底会让整张画布不停明灭；
-   而且两者压得一样重的话，"我只是路过"和"我选中了它"就成了同一个画面。
-   所以留一档差：压得深，但不到底——看得出焦点，也看得出这只是路过。
-   （试过 0.55，太浅，焦点不够跳）*/
-const HOVER_MUTE = 0.78;
-const PILL_BG = "rgba(12,12,12,0.9)";
-const PILL_BORDER = "rgba(255,255,255,0.14)";
-const PILL_TEXT = "#ededed";
-const TRANSPARENT = "rgba(0,0,0,0)";
 const DAY_MS = 24 * 3600 * 1000;
-
-function hexToRgb(hex: string): [number, number, number] {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m) return [128, 128, 128];
-  const v = parseInt(m[1], 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-}
-
-/** c1 向 c2 按 t 比例混色 */
-function mix(c1: string, c2: string, t: number): string {
-  const [r1, g1, b1] = hexToRgb(c1);
-  const [r2, g2, b2] = hexToRgb(c2);
-  const f = (a: number, b: number) => Math.round(a + (b - a) * t);
-  return `rgb(${f(r1, r2)},${f(g1, g2)},${f(b1, b2)})`;
-}
 
 /* 播放淡入：解析 hex / rgb / rgba（含 alpha）并线性插值 */
 function parseRgba(c: string): [number, number, number, number] {
@@ -258,168 +230,6 @@ function lerpColor(from: string, to: string, t: number): string {
 }
 /** 播放中新元素的淡入时长 */
 const FADE_MS = 320;
-
-/* 世界坐标网格：随相机平移/缩放（Figma/tldraw 式无限画布惯例）。
-   4 倍细分 LOD：每层 alpha 随其屏幕间距连续淡入（13px 进场 → 52px 满亮 5.5%），
-   粗层与细层线重合处自然叠亮，形成"大小格"层次；无任何跳变。 */
-const GRID_BASE_WORLD = 24; // 基准世界格距（匹配 ~300 尺度的布局）
-const GRID_FADE_IN_PX = 13;
-const GRID_FULL_PX = 52;
-const GRID_MAX_LEVEL_PX = 480;
-const GRID_MAX_ALPHA = 0.055;
-
-function drawWorldGrid(canvas: HTMLCanvasElement, sigma: Sigma): void {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const { width, height } = sigma.getDimensions();
-  const dpr = window.devicePixelRatio || 1;
-  const pw = Math.round(width * dpr);
-  const ph = Math.round(height * dpr);
-  if (canvas.width !== pw || canvas.height !== ph) {
-    canvas.width = pw;
-    canvas.height = ph;
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-  if (width <= 0 || height <= 0) return;
-
-  // 世界→屏幕：两个探针点求每世界单位像素数与原点位置（无相机旋转场景）
-  const p0 = sigma.graphToViewport({ x: 0, y: 0 });
-  const p1 = sigma.graphToViewport({ x: 1, y: 0 });
-  const ppw = p1.x - p0.x;
-  if (!Number.isFinite(ppw) || ppw <= 0) return;
-
-  // 最细可见层级：屏幕间距 ≥ 淡入阈值的最小 4 幂格距
-  let spacing = GRID_BASE_WORLD;
-  while (spacing * ppw < GRID_FADE_IN_PX) spacing *= 4;
-  while (spacing * ppw >= GRID_FADE_IN_PX * 4) spacing /= 4;
-
-  for (let sp = spacing; sp * ppw < GRID_MAX_LEVEL_PX; sp *= 4) {
-    const ss = sp * ppw;
-    const t = Math.min(
-      1,
-      (ss - GRID_FADE_IN_PX) / (GRID_FULL_PX - GRID_FADE_IN_PX),
-    );
-    if (t <= 0) continue;
-    ctx.strokeStyle = `rgba(255,255,255,${(GRID_MAX_ALPHA * t).toFixed(4)})`;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    const startX = ((p0.x % ss) + ss) % ss;
-    for (let x = startX; x <= width; x += ss) {
-      const px = Math.round(x) + 0.5;
-      ctx.moveTo(px, 0);
-      ctx.lineTo(px, height);
-    }
-    const startY = ((p0.y % ss) + ss) % ss;
-    for (let y = startY; y <= height; y += ss) {
-      const py = Math.round(y) + 0.5;
-      ctx.moveTo(0, py);
-      ctx.lineTo(width, py);
-    }
-    ctx.stroke();
-  }
-}
-
-/* 胶囊标签：深色圆角底 + 柔和文字（学 Semantica 的浮签风格） */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function drawPillLabel(
-  ctx: CanvasRenderingContext2D,
-  data: any,
-  settings: any,
-): void {
-  if (!data.label) return;
-  // hover 时悬浮卡（drawHoverCard）接管展示，底层 pill 隐去，避免双层标签
-  if (data.hideBaseLabel) return;
-  // Semantica chip: fontSize=clamp(10, size*0.25, 11), pad 6/3, radius 6, 位于节点上方，投影 blur 12
-  const size = Math.max(10, Math.min(11, data.size * 0.25));
-  ctx.font = `500 ${size}px Geist, Inter, "Noto Sans SC", sans-serif`;
-  ctx.textBaseline = "middle";
-  const padX = 6;
-  const padY = 3;
-  const w = ctx.measureText(data.label).width + padX * 2;
-  const h = size + padY * 2;
-  const x = data.x + Math.max(data.size * 0.7, 12);
-  const y = data.y - Math.max(data.size * 0.9, 10) - h;
-  ctx.save();
-  ctx.shadowColor = "rgba(0,0,0,0.6)";
-  ctx.shadowBlur = 12;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 6);
-  ctx.fillStyle = PILL_BG;
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = PILL_BORDER;
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.fillStyle = PILL_TEXT;
-  ctx.fillText(data.label, x + padX, y + h / 2);
-  ctx.restore();
-}
-
-/* Hover 悬浮卡（Semantica hoverCard 规格）：径向柔光 + 名称 + 类型行 */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function drawHoverCard(
-  ctx: CanvasRenderingContext2D,
-  data: any,
-  _settings: any,
-): void {
-  if (!data.label) return;
-  ctx.save();
-
-  // 柔光: 半径 max(size*4.8, 16), 类型色 alpha 0.18 → 0
-  const glowR = Math.max(data.size * 4.8, 16);
-  const [r, g, b] = hexToRgb((data.typeColor as string) ?? "#888888");
-  const grad = ctx.createRadialGradient(
-    data.x,
-    data.y,
-    0,
-    data.x,
-    data.y,
-    glowR,
-  );
-  grad.addColorStop(0, `rgba(${r},${g},${b},0.18)`);
-  grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.arc(data.x, data.y, glowR, 0, Math.PI * 2);
-  ctx.fill();
-
-  // 卡片: 标题 700/13 + 类型行 500/10 大写
-  const titleSize = 13;
-  const metaSize = 10;
-  const padX = 10;
-  const padY = 7;
-  const metaGap = 5;
-  const meta = String(data.typeLabel ?? "NODE").toUpperCase();
-  ctx.textBaseline = "top";
-  ctx.font = `700 ${titleSize}px Geist, Inter, "Noto Sans SC", sans-serif`;
-  const titleW = ctx.measureText(data.label).width;
-  ctx.font = `500 ${metaSize}px Geist, Inter, sans-serif`;
-  const metaW = ctx.measureText(meta).width;
-  const w = Math.max(titleW, metaW) + padX * 2;
-  const h = padY * 2 + titleSize + metaGap + metaSize;
-  const x = data.x + Math.max(data.size * 0.9, 16);
-  const y = data.y - Math.max(data.size * 1.1, 16) - h;
-
-  ctx.shadowColor = "rgba(0,0,0,0.62)";
-  ctx.shadowBlur = 15;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 8);
-  ctx.fillStyle = "rgba(12,12,12,0.94)";
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = "rgba(255,255,255,0.16)";
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  ctx.fillStyle = "#f5f5f5";
-  ctx.font = `700 ${titleSize}px Geist, Inter, "Noto Sans SC", sans-serif`;
-  ctx.fillText(data.label, x + padX, y + padY);
-  ctx.fillStyle = "rgba(255,255,255,0.5)";
-  ctx.font = `500 ${metaSize}px Geist, Inter, sans-serif`;
-  ctx.fillText(meta, x + padX, y + padY + titleSize + metaGap);
-  ctx.restore();
-}
 
 export function Graph() {
   const kbId = useKbId();
@@ -548,6 +358,13 @@ export function Graph() {
 
   // 空状态给谁看：管理员能自己去配模型，其他人只能去找管理员。与 Shell 共用同一份缓存
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
+  // 空状态说哪一句，取决于这个库走到哪一步了（#313）
+  const readiness = useReadiness(kbId);
+  const step = nextStep(readiness.data, {
+    kbId,
+    isAdmin: !!me.data?.is_admin,
+    canUpload: kb?.my_role !== "viewer",
+  });
   const data = useQuery({
     queryKey: ["graph", kb?.id, focusEntity, nodeBudget],
     queryFn: () =>
@@ -1415,7 +1232,7 @@ export function Graph() {
       <div className="absolute top-3 left-3 right-3 z-10 flex items-start gap-2 pointer-events-none">
         <div className="relative pointer-events-auto">
           <input
-            className="input-dark w-60 px-3 py-1.5 text-sm shadow-lg"
+            className="input-dark w-60 px-3 py-[5px] text-sm shadow-lg"
             placeholder={
               inSubgraph ? S.graph.searchInSubgraph : S.graph.searchEntity
             }
@@ -1863,22 +1680,26 @@ export function Graph() {
         </div>
       </div>
 
+      {/* pb 把这块从几何正中抬起 40px：视觉重心比几何中心略高一点，
+          正居中的短文字块看上去总是偏下 */}
       {empty && (
-        <div className="absolute inset-0 grid place-items-center pointer-events-none">
+        <div className="absolute inset-0 grid place-items-center pb-20 pointer-events-none">
           {/* 不放标题方块：页面本身就是图谱页，tab 条上也写着，
               第三遍写"图谱"两个字不带任何信息。空状态该说的是下一步做什么——
-              而"下一步"因人而异：管理员能直接去配模型，别人只能去找管理员（#267） */}
-          <div className="text-center text-sm text-neutral-500 max-w-xs pointer-events-auto">
-            {me.data?.is_admin ? S.graph.emptyBodyAdmin : S.graph.emptyBody}
-            {me.data?.is_admin && (
-              <Link
-                to="/admin"
-                search={{ tab: "models" }}
-                className="block mt-3 text-neutral-300 hover:text-white underline underline-offset-4"
-              >
-                {S.graph.emptyOpenModels}
-              </Link>
-            )}
+              而"下一步"因人而异：管理员能直接去配模型，别人只能去找管理员（#267）。
+              这一步现在由 readiness 统一判定（#313）：文档正在抽取时不该还让人去配模型 */}
+          <div className="pointer-events-auto">
+            <NextStep
+              {...(step ?? {
+                // 模型有了、文档也进来了、抽取跑完了，图还是空的
+                line: S.steps.nothingExtracted,
+                action: {
+                  label: S.steps.openLibrary,
+                  to: "/kb/$kbId/library",
+                  params: { kbId },
+                },
+              })}
+            />
           </div>
         </div>
       )}
@@ -2328,6 +2149,26 @@ function fmtTime(iso: string | null, precision: string | null): string | null {
   if (precision === "year") return `${y}`;
   if (precision === "month") return `${y}-${m}`;
   return `${y}-${m}-${day}`;
+}
+
+/** 输入框里的日期 → 时间戳 + 精度。**写多少位就是多少精度**，与抽取端
+ *  `parse_time` 同一个约定：2023 是「那一年」，2023-06 是「那个月」。
+ *
+ *  这也是不用日期选择器的理由——选择器逼人给出一个日，而「文档只说了上半年」
+ *  正是这个表单要修的那种错。回读比对是因为 `new Date("2023-13")` 不报错。 */
+function parseDateInput(
+  s: string,
+): { iso: string; precision: string } | null {
+  const t = s.trim();
+  const shape = /^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?$/.exec(t);
+  if (!shape) return null;
+  const [, y, m, d] = shape;
+  const iso = `${y}-${m ?? "01"}-${d ?? "01"}T00:00:00.000Z`;
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return null;
+  // 溢出静默：2023-13-01 会变成 2024-01-01，2023-02-30 会变成 3 月
+  if (parsed.toISOString().slice(0, 10) !== iso.slice(0, 10)) return null;
+  return { iso, precision: d ? "day" : m ? "month" : "year" };
 }
 
 function fmtInterval(f: EntityFact): string {
@@ -2871,6 +2712,11 @@ function EntityPanel({
   const setSameName = setRenamedPeers;
   // 手动合并：把同名的那个并进**当前这个**。方向写死是有意的——
   // 用户正在看的就是他判断为「主」的那一个
+  // 「并进来」先问一句。从前是浏览器原生 confirm()，和全站的对话框不是一套；
+  // 合并可撤销，所以走轻确认（不要求打字），同 Library 的重抽
+  const [mergeCandidate, setMergeCandidate] = useState<{ id: string; name: string } | null>(
+    null,
+  );
   const merge = useMutation({
     mutationFn: (source: string) => api.mergeEntities(kbId, source, entityId),
     onSuccess: () => {
@@ -3122,10 +2968,7 @@ function EntityPanel({
                   className="shrink-0 text-[11px] px-1.5 py-0.5 rounded text-neutral-400 hover:bg-white/10 hover:text-neutral-100"
                   disabled={merge.isPending}
                   title={S.graph.mergeIntoHint}
-                  onClick={() => {
-                    if (confirm(S.graph.mergeConfirm(p.name, e?.name ?? "")))
-                      merge.mutate(p.id);
-                  }}
+                  onClick={() => setMergeCandidate({ id: p.id, name: p.name })}
                 >
                   {S.graph.mergeInto}
                 </button>
@@ -3133,6 +2976,21 @@ function EntityPanel({
             ))}
           </div>
         </div>
+      )}
+
+      {mergeCandidate && (
+        <DangerConfirm
+          title={S.graph.mergeTitle}
+          hint={S.graph.mergeConfirm(mergeCandidate.name, e?.name ?? "")}
+          confirmLabel={S.graph.mergeInto}
+          cancelLabel={S.graph.editCancel}
+          busy={merge.isPending}
+          onConfirm={() => {
+            merge.mutate(mergeCandidate.id);
+            setMergeCandidate(null);
+          }}
+          onCancel={() => setMergeCandidate(null)}
+        />
       )}
 
       {/* 视图切换：Relations（分组）| Timeline（年表） */}
@@ -3396,9 +3254,10 @@ function TimelineRow({
   const interval = fmtInterval(fact);
   const isOpenEnded = !fact.valid_to;
   const literal = fmtObjectValue(fact.object_value);
+  const [editing, setEditing] = useState(false);
   return (
     <div
-      className={`rounded-lg transition-colors ${open ? "bg-white/[0.05]" : "hover:bg-white/[0.04]"} ${
+      className={`group rounded-lg transition-colors ${open ? "bg-white/[0.05]" : "hover:bg-white/[0.04]"} ${
         fact.stale ? "opacity-55" : ""
       }`}
       title={fact.stale ? S.graph.staleFactHint : undefined}
@@ -3411,11 +3270,37 @@ function TimelineRow({
               ⟲
             </span>
           )}
-          {isOpenEnded && fact.last_evidence_time && (
-            <span className="ml-auto text-neutral-600">
-              {S.graph.lastConfirmed(fact.last_evidence_time.slice(0, 10))}
+          <span className="ml-auto flex items-center gap-1.5">
+            {isOpenEnded && fact.last_evidence_time && (
+              <span className="text-neutral-600">
+                {S.graph.lastConfirmed(localDate(fact.last_evidence_time))}
+              </span>
+            )}
+            {/* 这一档只有断言事实：派生的区间是算出来的，走 Derived 那条路径，
+                改了下一轮推理也会覆盖（服务端另有 derived_by_rule 的防线） */}
+            <span
+              role="button"
+              tabIndex={0}
+              title={S.graph.editTime}
+              aria-label={S.graph.editTime}
+              onClick={(ev) => {
+                ev.stopPropagation();
+                setEditing((v) => !v);
+              }}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" || ev.key === " ") {
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  setEditing((v) => !v);
+                }
+              }}
+              className={`cursor-pointer rounded p-0.5 transition-opacity hover:text-neutral-200 focus-visible:opacity-100 ${
+                editing ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+              }`}
+            >
+              <Pencil size={10} />
             </span>
-          )}
+          </span>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 text-[13px] text-neutral-200">
           <span className="text-neutral-500 text-xs">
@@ -3468,7 +3353,157 @@ function TimelineRow({
           )}
         </div>
       </button>
+      {editing && (
+        <TimeEditor
+          kbId={kbId}
+          fact={fact}
+          onDone={() => setEditing(false)}
+        />
+      )}
       {open && <EvidenceList kbId={kbId} fact={fact} />}
+    </div>
+  );
+}
+
+/** 有效区间的人工修正表单（302）。
+ *
+ *  两端一起提交而不是逐端改：区间的两端互相定义，「清空结束端」与「这次不动
+ *  结束端」得能分辨。结束端的三个选项与账本里的三种写法一一对应，所以这里
+ *  没有「留空即至今」这种隐含约定——那正是 valid_to IS NULL 一度承载两个意思
+ *  的老毛病。 */
+function TimeEditor({
+  kbId,
+  fact,
+  onDone,
+}: {
+  kbId: string;
+  fact: EntityFact;
+  onDone: () => void;
+}) {
+  const qc = useQueryClient();
+  const [from, setFrom] = useState(
+    fmtTime(fact.valid_from, fact.valid_from_precision) ?? "",
+  );
+  const [to, setTo] = useState(
+    fmtTime(fact.valid_to, fact.valid_to_precision) ?? "",
+  );
+  const [endMode, setEndMode] = useState<"open" | "unknown" | "date">(
+    fact.valid_to
+      ? "date"
+      : fact.valid_to_precision === "unknown"
+        ? "unknown"
+        : "open",
+  );
+  const [note, setNote] = useState("");
+
+  const save = useMutation({
+    mutationFn: () => {
+      const f = from.trim() ? parseDateInput(from) : null;
+      if (from.trim() && !f) throw new Error(S.graph.timeBadDate);
+      const t = endMode === "date" ? parseDateInput(to) : null;
+      if (endMode === "date" && !t) throw new Error(S.graph.timeBadDate);
+      return api.updateFactTime(kbId, fact.id, {
+        valid_from: f?.iso ?? null,
+        valid_from_precision: f?.precision ?? null,
+        valid_to: t?.iso ?? null,
+        valid_to_precision:
+          endMode === "date"
+            ? (t?.precision ?? null)
+            : endMode === "unknown"
+              ? "unknown"
+              : null,
+        note: note.trim() || undefined,
+      });
+    },
+    onSuccess: (r) => {
+      // 对账的后果要说出来：改了起点可能顺手闭合了继任者的开放区间，
+      // 也可能撞出一条需要人裁的冲突。不说的话图会自己变而没人知道为什么
+      if (r.conflicts) toast.success(S.graph.timeSavedConflicts(r.conflicts));
+      else if (r.closed) toast.success(S.graph.timeSavedClosed(r.closed));
+      else toast.success(S.graph.timeSaved);
+      qc.invalidateQueries({ queryKey: ["entity", kbId] });
+      qc.invalidateQueries({ queryKey: ["graph"] });
+      qc.invalidateQueries({ queryKey: ["review", kbId] });
+      onDone();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <div
+      className="mx-2 mb-1.5 rounded-lg border border-white/10 bg-white/[0.03] p-2.5"
+      onClick={(ev) => ev.stopPropagation()}
+    >
+      <div className="flex items-center gap-2">
+        <label className="w-11 shrink-0 text-[11px] text-neutral-500">
+          {S.graph.timeStart}
+        </label>
+        <Input
+          value={from}
+          onChange={(e) => setFrom(e.target.value)}
+          placeholder={S.graph.timeFormat}
+          className="u-num flex-1 !py-1 !text-xs"
+        />
+      </div>
+      <div className="mt-1.5 flex items-start gap-2">
+        <label className="w-11 shrink-0 pt-1 text-[11px] text-neutral-500">
+          {S.graph.timeEnd}
+        </label>
+        <div className="flex-1 space-y-1">
+          {(
+            [
+              ["open", S.graph.timeEndOpen],
+              ["unknown", S.graph.timeEndUnknown],
+              ["date", S.graph.timeEndDate],
+            ] as const
+          ).map(([mode, label]) => (
+            <label
+              key={mode}
+              className="flex items-center gap-1.5 text-[11.5px] text-neutral-300"
+            >
+              <input
+                type="radio"
+                name={`end-${fact.id}`}
+                checked={endMode === mode}
+                onChange={() => setEndMode(mode)}
+                className="accent-white/70"
+              />
+              {label}
+              {mode === "date" && endMode === "date" && (
+                <Input
+                  value={to}
+                  onChange={(e) => setTo(e.target.value)}
+                  placeholder={S.graph.timeFormat}
+                  className="u-num ml-1 flex-1 !py-0.5 !text-xs"
+                />
+              )}
+            </label>
+          ))}
+        </div>
+      </div>
+      <div className="mt-1.5 flex items-center gap-2">
+        <label className="w-11 shrink-0 text-[11px] text-neutral-500">
+          {S.graph.timeNote}
+        </label>
+        <Input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder={S.graph.timeNotePlaceholder}
+          className="flex-1 !py-1 !text-xs"
+        />
+      </div>
+      <div className="mt-2 flex justify-end gap-1.5">
+        <Button size="sm" variant="ghost" onClick={onDone}>
+          {S.graph.timeCancel}
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => save.mutate()}
+          disabled={save.isPending}
+        >
+          {S.graph.timeSave}
+        </Button>
+      </div>
     </div>
   );
 }

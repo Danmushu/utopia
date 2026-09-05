@@ -109,6 +109,8 @@ pub struct Document {
     /// 墓碑（#268）：删除是认知轴上的一个事件。行、分块、证据、原始文件都留着，
     /// 只是不再算活的；撤销、同步撞见、同内容重传都能把它复活
     pub deleted_at: Option<DateTime<Utc>>,
+    /// 真删（#268 下半）：内容已抹掉，回不来。行留作墓碑
+    pub purged_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -806,6 +808,29 @@ pub struct EvidenceView {
     pub document_deleted: bool,
 }
 
+/// 这个库走到哪一步了（#313）：四个页面的空状态共用同一个判断。
+///
+/// 每个页面此前都各自假设「已经就绪」，于是空状态只会说同一句话：图谱页
+/// 让人去配模型，哪怕文档正在抽取；对话页照常显示问候语，哪怕模型根本没配——
+/// 用户问出第一句才撞墙。
+///
+/// **只回布尔与计数。** 模型那一项来自工作区设置，而那张表要 workspace admin
+/// 才看得到（`settings_routes::get`）。普通成员看不到配置，却需要知道配没配，
+/// 所以这里只说「有没有」，不带 base_url、模型名或任何凭据。
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Readiness {
+    /// 工作区配了对话模型。没有它，抽取与对话都跑不起来
+    pub has_chat_model: bool,
+    /// 活文档数（墓碑不算——删掉的文档不构成「库里有东西」）
+    pub documents: i64,
+    /// 正在解析或抽取的文档数
+    pub processing: i64,
+    /// 解析或抽取失败的文档数
+    pub failed: i64,
+    /// 图里的实体数。文档齐了、抽取也跑完了，这个还是 0 说明什么都没抽出来
+    pub entities: i64,
+}
+
 /// 时态冲突（S3 自动闭合拿不准的那些）：旧事实 vs 新事实，Review 页人裁。
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ConflictView {
@@ -857,6 +882,9 @@ pub struct KnowledgeBase {
     /// 而 0001 判据 2 说「本体是引导不是执法」：声明可能是错的，不该在用户
     /// 没表态时就按它改图
     pub materialize_inferences: bool,
+    /// 抽取结束自动排一轮类型消解（0016 C2）。**只自动落地在原类子树里精化的那一档**，
+    /// 跨轴的改判仍留给人。缺省开：基准上自动那一档的命中 39/41（#297），且每批可撤
+    pub auto_type_resolution: bool,
     /// 多久重推一次（分钟）。见 `knowledge_bases.inference_interval_minutes`
     pub inference_interval_minutes: i32,
     /// 上次推完的时间。**答的是「上次看过没有」，不是「上次改过没有」**
@@ -1131,7 +1159,22 @@ pub struct PendingFactView {
     pub quote: String,
     pub proposed_by: Option<Uuid>,
     pub proposed_by_name: Option<String>,
+    /// 经 MCP 记进来时，那枚令牌的名字（0014 里人给 agent 起的名）。
+    /// 网页端对话记的记忆这一位是空的——那时「谁说的」就是那个人本人
+    pub proposed_token_name: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// 一句记忆是谁提的。
+///
+/// **两层，不是一层**：`user_id` 是人（令牌代表的就是他，0014），`token_id` 是
+/// 他挂在这个库上的哪一个 agent。同一个人可以同时连着三个客户端，只记人
+/// 就等于让审核的人在三条一模一样的「张三说的」之间猜。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Proposer {
+    pub user_id: Option<Uuid>,
+    /// None = 不经 MCP（网页端对话，或批量摄入）
+    pub token_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, sqlx::FromRow)]
@@ -1190,6 +1233,8 @@ pub struct DocumentPage {
     pub ready: i64,
     pub extracting: i64,
     pub failed: i64,
+    /// 整库的墓碑数（删了、没清的）——左栏「已删除」那一行的数字，不随作用域变
+    pub deleted: i64,
 }
 
 /// 一枚个人访问令牌的元信息（0014）。**永远不含明文**——
